@@ -12,7 +12,7 @@ class Keyword(Base):
     __tablename__ = "keywords"
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    word: Mapped[str] = mapped_column(String(50), nullable=False, unique=True)
+    word: Mapped[str] = mapped_column(String(50), unique=True)
 
 class SourceType(str, enum.Enum):
     SITE = "site"
@@ -21,10 +21,10 @@ class SourceType(str, enum.Enum):
 class Source(Base):
     __tablename__ = "sources"
     id: Mapped[int] = mapped_column(primary_key=True)
-    type: Mapped[SourceType] = mapped_column(Enum(SourceType), nullable=False)
-    name: Mapped[str] = mapped_column(String(100), nullable=False)
-    url: Mapped[str] = mapped_column(String(255), nullable=False)
-    enabled: Mapped[bool] = mapped_column(nullable=False, default=True)
+    type: Mapped[SourceType] = mapped_column(Enum(SourceType))
+    name: Mapped[str] = mapped_column(String(100))
+    url: Mapped[str] = mapped_column(String(255))
+    enabled: Mapped[bool] = mapped_column(default=True)
 
 class NewsItem(Base):
     __tablename__ = "news_items"
@@ -47,8 +47,8 @@ class Post(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     news_id: Mapped[str] = mapped_column(ForeignKey("news_items.id"))
-    generated_text: Mapped[str] = mapped_column(Text, nullable=False)
-    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    generated_text: Mapped[str] = mapped_column(Text)
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     status: Mapped[StatusType] = mapped_column(Enum(StatusType), default=StatusType.NEW)
 
     
