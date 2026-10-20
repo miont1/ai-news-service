@@ -3,6 +3,8 @@ from datetime import UTC, datetime
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from app.models import SourceType
+
 
 class NewsItemBase(BaseModel):
     title: str = Field(..., max_length=255, description="News title")
@@ -35,6 +37,46 @@ class NewsItemCreate(NewsItemBase):
 
 class NewsItemResponse(NewsItemBase):
     id: str
+
+    model_config = {
+        "from_attributes": True
+    }
+
+class SourcesBase(BaseModel):
+    type: SourceType = Field(..., description="Source type")
+    name: str = Field(..., max_length=100, description="Source name")
+    url: str = Field(..., max_length=255, description="Source URL",
+     examples=["https://www.example.com/rss"])
+    enabled: bool = Field(default=True, description="Source enabled")
+
+class SourceCreate(SourcesBase):
+    pass
+
+class SourceUpdate(BaseModel):
+    name: str | None = Field(default=None, max_length=100)
+    type: SourceType | None = Field(default=None)
+    url: str | None = Field(default=None, max_length=255)
+    enabled: bool | None = Field(default=None)
+
+
+class SourceResponse(SourcesBase):
+    id: int
+
+    model_config = {
+        "from_attributes": True
+    }
+
+class KeywordsBase(BaseModel):
+    word: str = Field(..., max_length=50, description="Keyword")
+
+class KeywordCreate(KeywordsBase):
+    pass
+
+class KeywordUpdate(BaseModel):
+    word: str | None = Field(default=None, max_length=50)
+
+class KeywordResponse(KeywordsBase):
+    id: int
 
     model_config = {
         "from_attributes": True

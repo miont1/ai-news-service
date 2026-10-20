@@ -4,6 +4,7 @@ from fastapi import Depends, FastAPI, HTTPException, status
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.endpoints import news_router
 from app.database import engine, get_db
 
 
@@ -14,6 +15,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
+app.include_router(news_router)
 
 @app.get("/health", tags=["System"])
 async def health_check(db: AsyncSession = Depends(get_db)):
