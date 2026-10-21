@@ -8,12 +8,16 @@ from app.api.schemas import (
     KeywordCreate,
     KeywordResponse,
     KeywordUpdate,
+    NewsFetchResult,
+    NewsItemResponse,
     SourceCreate,
     SourceResponse,
     SourceUpdate,
 )
 from app.database import get_db
 from app.models import Keyword, Source
+from app.repositories import NewsRepository
+from app.services import NewsService
 
 news_router = APIRouter(
     prefix="/api",
@@ -119,3 +123,23 @@ async def delete_keyword(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Keyword not found")
     await db.delete(keyword)
     await db.commit()
+
+
+@news_router.post("/news/fetch", response_model=NewsFetchResult,
+    status_code=status.HTTP_200_OK, tags=["News"])
+async def fetch_site_news(
+    db: SessionDep
+):
+    service = NewsService(db)
+    return await service.fetch_and_store_site_news()
+
+
+@news_router.get("/news", response_model=list[NewsItemResponse],
+    status_code=status.HTTP_200_OK, tags=["News"])
+async def get_news(
+    db: SessionDep,
+    limit: int = 50,
+    offset: int = 0
+):
+    repo = NewsRepository(db)
+    return await repo.get_news(limit=limit, offset=offset)

@@ -81,3 +81,11 @@ class KeywordResponse(KeywordsBase):
     model_config = {
         "from_attributes": True
     }
+
+
+class NewsFetchResult(BaseModel):
+    sources_checked: int = Field(..., description="Number of active sources checked")
+    total_found: int = Field(..., description="Total articles found in feeds")
+    relevant_matched: int = Field(..., description="Articles matching keyword filters")
+    new_saved: int = Field(..., description="New non-duplicate articles saved to DB")
+    message: str = Field(..., description="Execution status summary message")
