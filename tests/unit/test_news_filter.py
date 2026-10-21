@@ -16,10 +16,10 @@ def create_sample_item(title: str, summary: str, url: str = "https://example.com
 
 def test_is_news_relevant_matches_title():
     item = create_sample_item(
-        title="Новий прорив у штучному інтелекті",
+        title="Новий прорив у сфері AI для медицини",
         summary="Компанія представила оновлену версію моделі",
     )
-    assert is_news_relevant(item, ["інтелект"]) is True
+    assert is_news_relevant(item, ["AI"]) is True
 
 
 def test_is_news_relevant_matches_summary():
@@ -27,7 +27,7 @@ def test_is_news_relevant_matches_summary():
         title="Новини технологій",
         summary="OpenAI випустила нову версію своєї моделі",
     )
-    assert is_news_relevant(item, ["openai"]) is True
+    assert is_news_relevant(item, ["OpenAI"]) is True
 
 
 def test_is_news_relevant_case_insensitive():
@@ -53,6 +53,40 @@ def test_is_news_relevant_empty_keywords_allows_all():
         summary="Опис без обмежень",
     )
     assert is_news_relevant(item, []) is True
+    assert is_news_relevant(item, None) is True
+
+
+def test_is_news_relevant_whitespace_or_empty_keywords_do_not_match():
+    item = create_sample_item(
+        title="Будь-який текст новини",
+        summary="Довільний опис",
+    )
+    # Passing empty strings or whitespace-only keywords must NOT match everything
+    assert is_news_relevant(item, ["", "   "]) is False
+    assert filter_relevant_news([item], ["", "   "]) == []
+
+
+def test_is_news_relevant_word_boundaries_prevent_false_positives():
+    # Keyword 'AI' must NOT match 'Ukraine', 'email', 'train', 'rain'
+    item_ukraine = create_sample_item(title="Ukraine updates export strategy", summary="Economic review")
+    item_email = create_sample_item(title="Check your email for details", summary="Communication tips")
+    item_train = create_sample_item(title="Speed train arrival", summary="Railway news")
+    item_rain = create_sample_item(title="Heavy rain in the region", summary="Weather warning")
+
+    assert is_news_relevant(item_ukraine, ["AI"]) is False
+    assert is_news_relevant(item_email, ["AI"]) is False
+    assert is_news_relevant(item_train, ["AI"]) is False
+    assert is_news_relevant(item_rain, ["AI"]) is False
+
+    # But it MUST match real occurrences with punctuation or standalone words
+    item_real_ai = create_sample_item(title="The future of (AI) in 2026", summary="Generative AI adoption")
+    assert is_news_relevant(item_real_ai, ["AI"]) is True
+
+
+def test_is_news_relevant_empty_title_and_summary_handled_safely():
+    item_empty = create_sample_item(title="", summary="")
+    assert is_news_relevant(item_empty, ["AI"]) is False
+    assert is_news_relevant(item_empty, []) is True
 
 
 def test_filter_relevant_news_filters_batch():

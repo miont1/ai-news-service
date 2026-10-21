@@ -20,7 +20,11 @@ class NewsService:
         self.source_repo = SourceRepository(session)
         self.keyword_repo = KeywordRepository(session)
 
-    async def fetch_and_store_site_news(self) -> dict:
+    async def fetch_and_store_site_news(
+        self,
+        keywords: list[str] | None = None,
+        use_db_keywords: bool = False,
+    ) -> dict:
         # 1. Get active sources of type SITE
         sources = await self.source_repo.get_active_sources(SourceType.SITE)
         if not sources:
@@ -32,8 +36,13 @@ class NewsService:
                 "message": "No active site sources found in database",
             }
 
-        # 2. Get active keywords
-        keywords = await self.keyword_repo.get_all_words()
+        # 2. Determine keywords filter (use_db_keywords flag takes precedence)
+        if use_db_keywords:
+            active_keywords = await self.keyword_repo.get_all_words()
+        elif keywords:
+            active_keywords = [k.strip() for k in keywords if k.strip()]
+        else:
+            active_keywords = []
 
         # 3. Fetch RSS feed items (metadata only)
         all_items: list[NewsItemCreate] = []
@@ -54,7 +63,7 @@ class NewsService:
             }
 
         # 4. Filter by keywords in title and summary
-        relevant_items = filter_relevant_news(all_items, keywords)
+        relevant_items = filter_relevant_news(all_items, active_keywords)
         if not relevant_items:
             return {
                 "sources_checked": len(sources),

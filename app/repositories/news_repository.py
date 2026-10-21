@@ -1,4 +1,5 @@
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.schemas import NewsItemCreate
@@ -19,10 +20,23 @@ class NewsRepository:
     async def save_news_items(self, items: list[NewsItemCreate]) -> list[NewsItem]:
         if not items:
             return []
-        db_items = [NewsItem(**item.model_dump()) for item in items]
-        self.session.add_all(db_items)
-        await self.session.commit()
-        return db_items
+        try:
+            db_items = [NewsItem(**item.model_dump()) for item in items]
+            self.session.add_all(db_items)
+            await self.session.commit()
+            return db_items
+        except IntegrityError:
+            await self.session.rollback()
+            saved: list[NewsItem] = []
+            for item in items:
+                try:
+                    db_item = NewsItem(**item.model_dump())
+                    self.session.add(db_item)
+                    await self.session.commit()
+                    saved.append(db_item)
+                except IntegrityError:
+                    await self.session.rollback()
+            return saved
 
     async def get_news(self, limit: int = 50, offset: int = 0) -> list[NewsItem]:
         query = (
