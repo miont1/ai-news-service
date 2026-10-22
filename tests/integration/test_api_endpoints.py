@@ -5,7 +5,6 @@ import pytest
 from httpx import AsyncClient
 
 from app.api.schemas import NewsItemCreate
-from app.models import NewsItem
 from app.repositories.news_repository import NewsRepository
 
 
@@ -14,7 +13,6 @@ async def test_health_check(client: AsyncClient):
     response = await client.get("/health")
     assert response.status_code == 200
     assert response.json() == {"status": "ok"}
-
 
 # ==========================================
 # Sources API Tests

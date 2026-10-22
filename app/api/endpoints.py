@@ -5,20 +5,31 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.ai.exceptions import (
+    AIAuthenticationError,
+    AIGenerationError,
+    AIRateLimitError,
+    AIServiceUnavailableError,
+)
+from app.ai.generator import PostGenerator
 from app.api.schemas import (
+    GenerateCustomRequest,
+    GenerateCustomResponse,
+    GenerateFromNewsRequest,
     KeywordCreate,
     KeywordResponse,
     KeywordUpdate,
     NewsFetchRequest,
     NewsFetchResult,
     NewsItemResponse,
+    PostResponse,
     SourceCreate,
     SourceResponse,
     SourceUpdate,
 )
 from app.database import get_db
-from app.models import Keyword, Source
-from app.repositories import NewsRepository
+from app.models import Keyword, Source, StatusType
+from app.repositories import NewsRepository, PostRepository
 from app.services import NewsService
 
 news_router = APIRouter(
@@ -230,4 +241,163 @@ async def get_news(
     offset: Annotated[int, Query(ge=0, description="Number of items to skip")] = 0,
 ):
     repo = NewsRepository(db)
-    return await repo.get_news(limit=limit, offset=offset)
+    return await repo.get_news(limit=limit, offset=offset)
+
+
+async def _generate_ai_post(
+    generator: PostGenerator,
+    title: str,
+    content: str | None = None,
+    summary: str | None = None,
+    raw_text: str | None = None,
+    source_url: str | None = None,
+    custom_prompt: str | None = None,
+) -> str:
+    try:
+        return await generator.generate_post(
+            title=title,
+            content=content,
+            summary=summary,
+            raw_text=raw_text,
+            source_url=source_url,
+            custom_prompt=custom_prompt,
+        )
+    except AIAuthenticationError as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"AI Authentication failed: {e}",
+        )
+    except AIRateLimitError as e:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=f"AI Rate limit reached: {e}",
+        )
+    except AIServiceUnavailableError as e:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"AI Service unavailable: {e}",
+        )
+    except AIGenerationError as e:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"AI Generation error: {e}",
+        )
+
+
+@news_router.post(
+    "/generate/news",
+    response_model=PostResponse,
+    status_code=status.HTTP_201_CREATED,
+    tags=["AI Generation"],
+)
+async def generate_post_from_news(
+    request: GenerateFromNewsRequest,
+    db: SessionDep,
+):
+    news_repo = NewsRepository(db)
+    post_repo = PostRepository(db)
+    generator = PostGenerator()
+
+    news_item = await news_repo.get_by_id(request.news_id)
+    if not news_item:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"NewsItem with id '{request.news_id}' not found",
+        )
+
+    # Check if a post for this news item already exists
+    existing_post = await post_repo.get_by_news_id(request.news_id)
+    if existing_post:
+        if existing_post.status == StatusType.PUBLISHED:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"Post for news_id '{request.news_id}' has already been published (post_id={existing_post.id}). Cannot overwrite.",
+            )
+        if not request.regenerate:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    f"Post for news_id '{request.news_id}' already exists "
+                    f"(post_id={existing_post.id}, status='{existing_post.status}'). "
+                    "Pass regenerate=true to overwrite."
+                ),
+            )
+
+    generated_text = await _generate_ai_post(
+        generator=generator,
+        title=news_item.title,
+        summary=news_item.summary,
+        raw_text=news_item.raw_text,
+        source_url=news_item.url,
+        custom_prompt=request.custom_prompt,
+    )
+
+    if existing_post and request.regenerate:
+        return await post_repo.update_generated_text(
+            post_id=existing_post.id,
+            generated_text=generated_text,
+        )
+
+    return await post_repo.create_post(
+        news_id=news_item.id,
+        generated_text=generated_text,
+        status=StatusType.GENERATED,
+    )
+
+
+@news_router.post(
+    "/generate/custom",
+    response_model=GenerateCustomResponse,
+    status_code=status.HTTP_200_OK,
+    tags=["AI Generation"],
+)
+async def generate_post_from_custom(
+    request: GenerateCustomRequest,
+):
+    generator = PostGenerator()
+    generated_text = await _generate_ai_post(
+        generator=generator,
+        title=request.title,
+        content=request.content,
+        source_url=request.source_url,
+        custom_prompt=request.custom_prompt,
+    )
+    return GenerateCustomResponse(generated_text=generated_text)
+
+
+@news_router.get(
+    "/posts",
+    response_model=list[PostResponse],
+    status_code=status.HTTP_200_OK,
+    tags=["Posts"],
+)
+async def get_posts(
+    db: SessionDep,
+    post_status: Annotated[StatusType | None, Query(alias="status", description="Filter by status")] = None,
+    news_id: Annotated[str | None, Query(description="Filter by news item ID")] = None,
+    limit: Annotated[int, Query(ge=1, le=100, description="Max posts to return")] = 50,
+    offset: Annotated[int, Query(ge=0, description="Number of items to skip")] = 0,
+):
+    repo = PostRepository(db)
+    return await repo.get_posts(status=post_status, news_id=news_id, limit=limit, offset=offset)
+
+
+@news_router.get(
+    "/posts/{post_id}",
+    response_model=PostResponse,
+    status_code=status.HTTP_200_OK,
+    tags=["Posts"],
+)
+async def get_post_by_id(
+    post_id: int,
+    db: SessionDep,
+):
+    repo = PostRepository(db)
+    post = await repo.get_by_id(post_id)
+    if not post:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Post with id {post_id} not found",
+        )
+    return post
+

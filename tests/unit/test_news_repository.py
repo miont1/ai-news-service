@@ -76,3 +76,17 @@ async def test_get_existing_ids_empty_and_populated(db_session: AsyncSession):
     # Query with item.id and another random id
     existing = await repo.get_existing_ids([item.id, "random-non-existent-id"])
     assert existing == {item.id}
+
+
+@pytest.mark.asyncio
+async def test_get_existing_urls(db_session: AsyncSession):
+    repo = NewsRepository(db_session)
+
+    assert await repo.get_existing_urls([]) == set()
+
+    item = NewsItemCreate(title="Item", summary="S", url="https://ex.com/article-1", source="src")
+    await repo.save_news_items([item])
+
+    existing = await repo.get_existing_urls(["https://ex.com/article-1", "https://ex.com/article-2"])
+    assert existing == {"https://ex.com/article-1"}
+

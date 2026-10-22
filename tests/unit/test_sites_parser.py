@@ -106,17 +106,22 @@ def test_parse_rss_item_invalid_and_missing_pub_date():
 
 
 @pytest.mark.asyncio
-async def test_fetch_rss_feed_handles_network_errors_gracefully():
+async def test_fetch_rss_feed_raises_network_errors():
     # 1. HTTP 404 / 500 error
     mock_response_500 = httpx.Response(status_code=500, request=httpx.Request("GET", "https://error.com/rss"))
-    with patch("httpx.AsyncClient.get", new=AsyncMock(side_effect=httpx.HTTPStatusError("Server Error", request=mock_response_500.request, response=mock_response_500))):
-        items = await fetch_rss_feed("https://error.com/rss")
-        assert items == []
+    with (
+        patch("httpx.AsyncClient.get", new=AsyncMock(side_effect=httpx.HTTPStatusError("Server Error", request=mock_response_500.request, response=mock_response_500))),
+        pytest.raises(httpx.HTTPStatusError),
+    ):
+        await fetch_rss_feed("https://error.com/rss")
 
     # 2. Timeout error
-    with patch("httpx.AsyncClient.get", new=AsyncMock(side_effect=httpx.ConnectTimeout("Connection timed out"))):
-        items = await fetch_rss_feed("https://timeout.com/rss")
-        assert items == []
+    with (
+        patch("httpx.AsyncClient.get", new=AsyncMock(side_effect=httpx.ConnectTimeout("Connection timed out"))),
+        pytest.raises(httpx.ConnectTimeout),
+    ):
+        await fetch_rss_feed("https://timeout.com/rss")
+
 
 
 @pytest.mark.asyncio

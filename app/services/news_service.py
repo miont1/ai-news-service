@@ -1,8 +1,9 @@
+import asyncio
 import logging
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.schemas import NewsItemCreate
+from app.api.schemas import FailedSourceInfo, NewsItemCreate
 from app.models import SourceType
 from app.news_parser.sites import fetch_rss_feed, populate_articles_raw_text
 from app.repositories.keyword_repository import KeywordRepository
@@ -44,22 +45,42 @@ class NewsService:
         else:
             active_keywords = []
 
-        # 3. Fetch RSS feed items (metadata only)
+        # 3. Fetch RSS feeds concurrently across all sources
+        tasks = [fetch_rss_feed(source.url) for source in sources]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
         all_items: list[NewsItemCreate] = []
-        for source in sources:
-            try:
-                items = await fetch_rss_feed(source.url)
-                all_items.extend(items)
-            except Exception as e:
-                logger.error("Error fetching RSS feed from %s: %s", source.url, e)
+        failed_sources: list[FailedSourceInfo] = []
+
+        for source, res in zip(sources, results):
+            if isinstance(res, Exception):
+                err_msg = str(res) or type(res).__name__
+                logger.warning(
+                    "Error fetching RSS feed from %s (%s): %s",
+                    source.name,
+                    source.url,
+                    err_msg,
+                )
+                failed_sources.append(
+                    FailedSourceInfo(
+                        source_name=source.name,
+                        url=source.url,
+                        error=err_msg,
+                    )
+                )
+            else:
+                all_items.extend(res)
 
         if not all_items:
+            fail_suffix = f" ({len(failed_sources)} sources failed)" if failed_sources else ""
             return {
                 "sources_checked": len(sources),
+                "sources_failed": len(failed_sources),
                 "total_found": 0,
                 "relevant_matched": 0,
                 "new_saved": 0,
-                "message": "No items retrieved from sources",
+                "failed_sources": failed_sources,
+                "message": f"No items retrieved from sources{fail_suffix}",
             }
 
         # 4. Filter by keywords in title and summary
@@ -67,30 +88,42 @@ class NewsService:
         if not relevant_items:
             return {
                 "sources_checked": len(sources),
+                "sources_failed": len(failed_sources),
                 "total_found": len(all_items),
                 "relevant_matched": 0,
                 "new_saved": 0,
+                "failed_sources": failed_sources,
                 "message": "None of the found items matched configured keywords",
             }
 
-        # 5. Deduplicate within current batch and against database
+        # 5. Deduplicate within current batch and against database (by both ID and URL)
         unique_batch_items: dict[str, NewsItemCreate] = {}
+        seen_batch_urls: set[str] = set()
         for item in relevant_items:
+            if item.url and item.url in seen_batch_urls:
+                continue
             if item.id and item.id not in unique_batch_items:
                 unique_batch_items[item.id] = item
+                if item.url:
+                    seen_batch_urls.add(item.url)
 
         existing_ids = await self.news_repo.get_existing_ids(list(unique_batch_items.keys()))
+        batch_urls = [item.url for item in unique_batch_items.values() if item.url]
+        existing_urls = await self.news_repo.get_existing_urls(batch_urls)
+
         new_items = [
             item for item_id, item in unique_batch_items.items()
-            if item_id not in existing_ids
+            if item_id not in existing_ids and (not item.url or item.url not in existing_urls)
         ]
 
         if not new_items:
             return {
                 "sources_checked": len(sources),
+                "sources_failed": len(failed_sources),
                 "total_found": len(all_items),
                 "relevant_matched": len(relevant_items),
                 "new_saved": 0,
+                "failed_sources": failed_sources,
                 "message": "All relevant items already exist in database",
             }
 
@@ -102,8 +135,10 @@ class NewsService:
 
         return {
             "sources_checked": len(sources),
+            "sources_failed": len(failed_sources),
             "total_found": len(all_items),
             "relevant_matched": len(relevant_items),
             "new_saved": len(saved_items),
+            "failed_sources": failed_sources,
             "message": f"Successfully parsed, filtered and saved {len(saved_items)} news items",
         }

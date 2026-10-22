@@ -1,7 +1,7 @@
 import asyncio
+import logging
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
-import logging
 
 import httpx
 import trafilatura
@@ -24,7 +24,7 @@ async def fetch_raw_text(client: httpx.AsyncClient, url: str) -> str:
             response.raise_for_status()
             text = trafilatura.extract(response.text) or ""
             return text
-        except Exception as e:
+        except (httpx.HTTPError, ValueError, TypeError, RuntimeError) as e:
             logger.warning("Error fetching text for %s: %s", url, e)
             return ""
 
@@ -61,7 +61,7 @@ def parse_rss_item(item, feed_url: str) -> NewsItemCreate:
     if pub_date_node and pub_date_node.text(strip=True):
         try:
             published_at = parsedate_to_datetime(pub_date_node.text(strip=True))
-        except Exception:
+        except (ValueError, TypeError, IndexError):
             published_at = datetime.now(UTC)
     else:
         published_at = datetime.now(UTC)
@@ -77,18 +77,20 @@ def parse_rss_item(item, feed_url: str) -> NewsItemCreate:
 
 
 async def fetch_rss_feed(feed_url: str) -> list[NewsItemCreate]:
-    """Fetch and parse RSS feed items (metadata only). Returns empty list on network or parse failure."""
-    try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            response = await client.get(feed_url, follow_redirects=True)
-            response.raise_for_status()
+    """Fetch and parse RSS feed items (metadata only).
 
-            tree = LexborHTMLParser(response.text)
-            items = tree.css("item")
-            return [parse_rss_item(item, feed_url) for item in items]
-    except Exception as e:
-        logger.warning("Failed to fetch RSS feed from %s: %s", feed_url, e)
-        return []
+    Raises:
+        httpx.HTTPError: on network or HTTP status failures.
+        Exception: on unexpected parsing or content issues.
+    """
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        response = await client.get(feed_url, follow_redirects=True)
+        response.raise_for_status()
+
+        tree = LexborHTMLParser(response.text)
+        items = tree.css("item")
+        return [parse_rss_item(item, feed_url) for item in items]
+
 
 
 async def populate_articles_raw_text(items: list[NewsItemCreate]) -> list[NewsItemCreate]:

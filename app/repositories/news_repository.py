@@ -17,6 +17,15 @@ class NewsRepository:
         result = await self.session.execute(query)
         return set(result.scalars().all())
 
+    async def get_existing_urls(self, urls: list[str]) -> set[str]:
+        cleaned_urls = [u for u in urls if u and u.strip()]
+        if not cleaned_urls:
+            return set()
+        query = select(NewsItem.url).where(NewsItem.url.in_(cleaned_urls))
+        result = await self.session.execute(query)
+        return set(result.scalars().all())
+
+
     async def save_news_items(self, items: list[NewsItemCreate]) -> list[NewsItem]:
         if not items:
             return []
@@ -38,6 +47,9 @@ class NewsRepository:
                     await self.session.rollback()
             return saved
 
+    async def get_by_id(self, news_id: str) -> NewsItem | None:
+        return await self.session.get(NewsItem, news_id)
+
     async def get_news(self, limit: int = 50, offset: int = 0) -> list[NewsItem]:
         query = (
             select(NewsItem)
@@ -47,3 +59,4 @@ class NewsRepository:
         )
         result = await self.session.execute(query)
         return list(result.scalars().all())
+

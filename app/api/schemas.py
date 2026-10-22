@@ -3,7 +3,7 @@ from datetime import UTC, datetime
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-from app.models import SourceType
+from app.models import SourceType, StatusType
 
 
 class NewsItemBase(BaseModel):
@@ -135,10 +135,83 @@ class NewsFetchRequest(BaseModel):
     )
 
 
+class FailedSourceInfo(BaseModel):
+    source_name: str = Field(..., description="Name of the failed source")
+    url: str = Field(..., description="URL of the failed source")
+    error: str = Field(..., description="Failure reason or error description")
+
+
 class NewsFetchResult(BaseModel):
     sources_checked: int = Field(..., description="Number of active sources checked")
+    sources_failed: int = Field(default=0, description="Number of sources that failed to fetch")
     total_found: int = Field(..., description="Total articles found in feeds")
     relevant_matched: int = Field(..., description="Articles matching keyword filters")
     new_saved: int = Field(..., description="New non-duplicate articles saved to DB")
+    failed_sources: list[FailedSourceInfo] = Field(
+        default_factory=list,
+        description="List of sources that encountered errors during fetch",
+    )
     message: str = Field(..., description="Execution status summary message")
+
+
+
+class PostResponse(BaseModel):
+    id: int
+    news_id: str
+    generated_text: str
+    published_at: datetime | None = None
+    status: StatusType
+
+    model_config = {
+        "from_attributes": True
+    }
+
+
+class GenerateFromNewsRequest(BaseModel):
+    news_id: str = Field(
+        ...,
+        min_length=1,
+        description="ID of existing news item in database to generate post for.",
+    )
+    custom_prompt: str | None = Field(
+        default=None,
+        description="Optional custom system prompt to override default prompt.",
+    )
+    regenerate: bool = Field(
+        default=False,
+        description="If True, allows regenerating and updating an existing unpublished post.",
+    )
+
+
+
+class GenerateCustomRequest(BaseModel):
+    title: str = Field(
+        ...,
+        min_length=1,
+        max_length=255,
+        description="Title of the news or message.",
+    )
+    content: str = Field(
+        ...,
+        min_length=1,
+        description="Content or summary to generate post from.",
+    )
+    source_url: str | None = Field(
+        default=None,
+        max_length=1024,
+        description="Optional source URL.",
+    )
+    custom_prompt: str | None = Field(
+        default=None,
+        description="Optional custom system prompt to override default prompt.",
+    )
+
+
+class GenerateCustomResponse(BaseModel):
+    generated_text: str = Field(
+        ...,
+        description="AI-generated post content.",
+    )
+
+
 
