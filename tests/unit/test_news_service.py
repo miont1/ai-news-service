@@ -285,4 +285,225 @@ async def test_news_service_skip_if_url_already_exists():
     service.news_repo.save_news_items.assert_not_called()
 
 
+# ==============================================================================
+# Telegram News Service Tests
+# ==============================================================================
+
+
+@pytest.mark.asyncio
+async def test_telegram_news_no_active_sources():
+    mock_session = AsyncMock()
+    service = NewsService(mock_session)
+    service.source_repo.get_active_sources = AsyncMock(return_value=[])
+
+    result = await service.fetch_and_store_telegram_news()
+
+    assert result["sources_checked"] == 0
+    assert result["news_found"] == 0
+    assert result["news_stored"] == 0
+    assert "No active Telegram sources found" in result["message"]
+    service.source_repo.get_active_sources.assert_awaited_once_with(SourceType.TG)
+
+
+@pytest.mark.asyncio
+async def test_telegram_news_missing_credentials():
+    mock_session = AsyncMock()
+    service = NewsService(mock_session)
+
+    tg_source = Source(id=1, name="TG Tech", url="@tech_ua", type=SourceType.TG, enabled=True)
+    service.source_repo.get_active_sources = AsyncMock(return_value=[tg_source])
+
+    with patch("app.news_parser.telegram.settings") as mock_settings:
+        mock_settings.TG_API_ID = None
+        mock_settings.TG_API_HASH = None
+
+        result = await service.fetch_and_store_telegram_news(client=None)
+
+    assert result["sources_checked"] == 1
+    assert result["sources_failed"] == 1
+    assert len(result["failed_sources"]) == 1
+    assert "credentials not configured" in result["failed_sources"][0].error
+    assert result["news_found"] == 0
+    assert result["news_stored"] == 0
+
+
+@pytest.mark.asyncio
+async def test_telegram_news_success_with_client():
+    mock_session = AsyncMock()
+    service = NewsService(mock_session)
+
+    tg_source = Source(id=1, name="TG Tech", url="@tech_ua", type=SourceType.TG, enabled=True)
+    service.source_repo.get_active_sources = AsyncMock(return_value=[tg_source])
+
+    item1 = NewsItemCreate(
+        title="Новий реліз Python 3.14",
+        summary="Вийшла нова версія мови з покращеною продуктивністю.",
+        raw_text="Вийшла нова версія мови Python 3.14 з покращеною продуктивністю.",
+        url="https://t.me/tech_ua/101",
+        source="tech_ua",
+    )
+    item2 = NewsItemCreate(
+        title="Штучний інтелект у медицині",
+        summary="AI допомагає ставити діагнози швидше.",
+        raw_text="AI допомагає ставити діагнози швидше за лікарів.",
+        url="https://t.me/tech_ua/102",
+        source="tech_ua",
+    )
+
+    mock_client = AsyncMock()
+    service.news_repo.get_existing_ids = AsyncMock(return_value=set())
+    service.news_repo.get_existing_urls = AsyncMock(return_value=set())
+    service.news_repo.save_news_items = AsyncMock(return_value=[item1, item2])
+
+    with patch("app.services.news_service.fetch_channel_posts", new=AsyncMock(return_value=[item1, item2])):
+        result = await service.fetch_and_store_telegram_news(limit_per_channel=15, client=mock_client)
+
+    assert result["sources_checked"] == 1
+    assert result["sources_failed"] == 0
+    assert result["news_found"] == 2
+    assert result["total_found"] == 2
+    assert result["relevant_matched"] == 2
+    assert result["news_stored"] == 2
+    assert result["new_saved"] == 2
+    service.news_repo.save_news_items.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_telegram_news_keyword_filtering():
+    mock_session = AsyncMock()
+    service = NewsService(mock_session)
+
+    tg_source = Source(id=1, name="TG News", url="t.me/channel_news", type=SourceType.TG, enabled=True)
+    service.source_repo.get_active_sources = AsyncMock(return_value=[tg_source])
+
+    item_ai = NewsItemCreate(
+        title="Революція AI",
+        summary="Моделі нового покоління",
+        raw_text="Повний текст новини про AI",
+        url="https://t.me/channel_news/1",
+        source="channel_news",
+    )
+    item_weather = NewsItemCreate(
+        title="Прогноз погоди",
+        summary="Сьогодні очікується дощ",
+        raw_text="Повний текст прогнозу погоди",
+        url="https://t.me/channel_news/2",
+        source="channel_news",
+    )
+
+    mock_client = AsyncMock()
+    service.news_repo.get_existing_ids = AsyncMock(return_value=set())
+    service.news_repo.get_existing_urls = AsyncMock(return_value=set())
+    service.news_repo.save_news_items = AsyncMock(return_value=[item_ai])
+
+    with patch("app.services.news_service.fetch_channel_posts", new=AsyncMock(return_value=[item_ai, item_weather])):
+        result = await service.fetch_and_store_telegram_news(keywords=["AI"], client=mock_client)
+
+    assert result["news_found"] == 2
+    assert result["relevant_matched"] == 1
+    assert result["news_stored"] == 1
+    # Verify only item_ai was passed to save_news_items
+    saved_items = service.news_repo.save_news_items.call_args[0][0]
+    assert len(saved_items) == 1
+    assert saved_items[0].url == item_ai.url
+
+
+@pytest.mark.asyncio
+async def test_telegram_news_deduplication():
+    mock_session = AsyncMock()
+    service = NewsService(mock_session)
+
+    source1 = Source(id=1, name="Channel 1", url="@chan1", type=SourceType.TG, enabled=True)
+    source2 = Source(id=2, name="Channel 2", url="@chan2", type=SourceType.TG, enabled=True)
+    service.source_repo.get_active_sources = AsyncMock(return_value=[source1, source2])
+
+    item_duplicate_1 = NewsItemCreate(
+        title="Термінова заява",
+        summary="Опис заяви",
+        raw_text="Повний текст",
+        url="https://t.me/orig/10",
+        source="chan1",
+    )
+    item_duplicate_2 = NewsItemCreate(
+        title="Термінова заява",
+        summary="Опис заяви",
+        raw_text="Повний текст",
+        url="https://t.me/orig/10",
+        source="chan2",
+    )
+    item_already_in_db = NewsItemCreate(
+        title="Стара новина",
+        summary="Вже збережена",
+        raw_text="Повний текст",
+        url="https://t.me/orig/5",
+        source="chan1",
+    )
+
+    async def fake_fetch(client, url, limit=20, **kwargs):
+        if url == "@chan1":
+            return [item_duplicate_1, item_already_in_db]
+        return [item_duplicate_2]
+
+    mock_client = AsyncMock()
+    # item_already_in_db URL is already in database
+    service.news_repo.get_existing_ids = AsyncMock(return_value=set())
+    service.news_repo.get_existing_urls = AsyncMock(return_value={"https://t.me/orig/5"})
+    service.news_repo.save_news_items = AsyncMock(return_value=[item_duplicate_1])
+
+    with patch("app.services.news_service.fetch_channel_posts", side_effect=fake_fetch):
+        result = await service.fetch_and_store_telegram_news(client=mock_client)
+
+    # Total found = 3 (item1, old_item, item2)
+    # item_duplicate_2 is dropped by in-batch dedup (same url as item_duplicate_1)
+    # item_already_in_db is dropped by DB dedup
+    # Only 1 unique item saved
+    assert result["news_found"] == 3
+    assert result["news_stored"] == 1
+    assert result["new_saved"] == 1
+    saved_items = service.news_repo.save_news_items.call_args[0][0]
+    assert len(saved_items) == 1
+    assert saved_items[0].url == item_duplicate_1.url
+
+
+@pytest.mark.asyncio
+async def test_telegram_news_partial_failure():
+    mock_session = AsyncMock()
+    service = NewsService(mock_session)
+
+    broken_source = Source(id=1, name="Broken Channel", url="@broken_chan", type=SourceType.TG, enabled=True)
+    working_source = Source(id=2, name="Working Channel", url="@working_chan", type=SourceType.TG, enabled=True)
+    service.source_repo.get_active_sources = AsyncMock(return_value=[broken_source, working_source])
+
+    valid_item = NewsItemCreate(
+        title="Успішна новина",
+        summary="Опис успіху",
+        raw_text="Повний текст успішної новини",
+        url="https://t.me/working_chan/1",
+        source="working_chan",
+    )
+
+    async def fake_fetch(client, url, limit=20, **kwargs):
+        if url == broken_source.url:
+            raise ConnectionError("Telegram network timeout")
+        return [valid_item]
+
+    mock_client = AsyncMock()
+    service.news_repo.get_existing_ids = AsyncMock(return_value=set())
+    service.news_repo.get_existing_urls = AsyncMock(return_value=set())
+    service.news_repo.save_news_items = AsyncMock(return_value=[valid_item])
+
+    with patch("app.services.news_service.fetch_channel_posts", side_effect=fake_fetch):
+        result = await service.fetch_and_store_telegram_news(client=mock_client)
+
+    assert result["sources_checked"] == 2
+    assert result["sources_failed"] == 1
+    assert len(result["failed_sources"]) == 1
+    assert result["failed_sources"][0].source_name == "Broken Channel"
+    assert "Telegram network timeout" in result["failed_sources"][0].error
+    assert result["news_found"] == 1
+    assert result["news_stored"] == 1
+    service.news_repo.save_news_items.assert_awaited_once()
+
+
+
 

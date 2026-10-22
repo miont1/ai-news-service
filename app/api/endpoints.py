@@ -28,7 +28,7 @@ from app.api.schemas import (
     SourceUpdate,
 )
 from app.database import get_db
-from app.models import Keyword, Source, StatusType
+from app.models import Keyword, Source, SourceType, StatusType
 from app.repositories import NewsRepository, PostRepository
 from app.services import NewsService
 
@@ -227,10 +227,46 @@ async def fetch_site_news(
     service = NewsService(db)
     keywords = request.keywords if request else None
     use_db_keywords = request.use_db_keywords if request else False
+    source_type = request.source_type if request else None
+
+    if source_type == SourceType.TG:
+        limit = request.limit_per_channel if request else 20
+        min_length = request.min_text_length if request else 200
+        return await service.fetch_and_store_telegram_news(
+            limit_per_channel=limit,
+            min_text_length=min_length,
+            keywords=keywords,
+            use_db_keywords=use_db_keywords,
+        )
+
     return await service.fetch_and_store_site_news(
         keywords=keywords,
         use_db_keywords=use_db_keywords,
     )
+
+
+@news_router.post(
+    "/news/fetch/telegram",
+    response_model=NewsFetchResult,
+    status_code=status.HTTP_200_OK,
+    tags=["News"],
+)
+async def fetch_telegram_news(
+    db: SessionDep,
+    request: NewsFetchRequest | None = None,
+):
+    service = NewsService(db)
+    keywords = request.keywords if request else None
+    use_db_keywords = request.use_db_keywords if request else False
+    limit = request.limit_per_channel if request else 20
+    min_length = request.min_text_length if request else 200
+    return await service.fetch_and_store_telegram_news(
+        limit_per_channel=limit,
+        min_text_length=min_length,
+        keywords=keywords,
+        use_db_keywords=use_db_keywords,
+    )
+
 
 
 @news_router.get("/news", response_model=list[NewsItemResponse],

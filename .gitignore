@@ -9,3 +9,7 @@ wheels/
 
 # Virtual environments
 .venv
+
+# Telethon sessions
+*.session
+*.session-journal

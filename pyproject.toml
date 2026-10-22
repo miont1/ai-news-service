@@ -14,6 +14,7 @@ dependencies = [
     "pydantic-settings>=2.16.0",
     "selectolax>=1.0.1",
     "sqlalchemy[asyncio]>=2.1.5",
+    "telethon>=1.45.0",
     "trafilatura>=2.3.1",
     "uvicorn>=0.54.0",
 ]

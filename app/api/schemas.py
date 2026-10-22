@@ -133,6 +133,21 @@ class NewsFetchRequest(BaseModel):
         default=None,
         description="List of keywords to filter by when use_db_keywords is False. If omitted and use_db_keywords is False, all news are fetched without keyword filtering.",
     )
+    source_type: SourceType | None = Field(
+        default=None,
+        description="Optional source type filter ('site' or 'tg'). If omitted, defaults to site for /news/fetch.",
+    )
+    limit_per_channel: int = Field(
+        default=20,
+        ge=1,
+        le=100,
+        description="Max messages to fetch per Telegram channel.",
+    )
+    min_text_length: int = Field(
+        default=200,
+        ge=0,
+        description="Minimum text length in characters (excluding URLs) for Telegram news items.",
+    )
 
 
 class FailedSourceInfo(BaseModel):
@@ -212,6 +227,3 @@ class GenerateCustomResponse(BaseModel):
         ...,
         description="AI-generated post content.",
     )
-
-
-

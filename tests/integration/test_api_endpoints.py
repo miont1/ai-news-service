@@ -1,3 +1,4 @@
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from unittest.mock import AsyncMock, patch
 
@@ -257,3 +258,91 @@ async def test_fetch_news_pipeline_integration(client: AsyncClient):
     assert len(news_list) == 1
     assert news_list[0]["title"] == "Новини про технології майбутнього"
     assert news_list[0]["url"] == "https://test.com/1"
+
+
+@pytest.mark.asyncio
+async def test_fetch_telegram_news_no_sources(client: AsyncClient):
+    res = await client.post("/api/news/fetch/telegram", json={})
+    assert res.status_code == 200
+    data = res.json()
+    assert data["sources_checked"] == 0
+    assert data["new_saved"] == 0
+    assert "No active Telegram sources found" in data["message"]
+
+
+@pytest.mark.asyncio
+async def test_fetch_telegram_news_pipeline_integration(client: AsyncClient):
+    # 1. Create a telegram source in DB
+    await client.post("/api/sources", json={"name": "Tech TG", "url": "@techtg", "type": "tg"})
+
+    mock_post_1 = NewsItemCreate(
+        title="Новий AI прорив",
+        summary="Деталі нового прориву в сфері AI",
+        raw_text="Повний текст повідомлення про AI",
+        url="https://t.me/techtg/1",
+        source="techtg",
+    )
+    mock_post_2 = NewsItemCreate(
+        title="Погода в Києві",
+        summary="Сонячно",
+        raw_text="Повний текст погоди",
+        url="https://t.me/techtg/2",
+        source="techtg",
+    )
+
+    @asynccontextmanager
+    async def mock_tg_conn(*args, **kwargs):
+        yield AsyncMock()
+
+    with (
+        patch("app.services.news_service.get_telegram_client", side_effect=mock_tg_conn),
+        patch("app.services.news_service.fetch_channel_posts", new=AsyncMock(return_value=[mock_post_1, mock_post_2])),
+    ):
+        # 2. Fetch using POST /api/news/fetch/telegram with keywords filter
+        fetch_res = await client.post(
+            "/api/news/fetch/telegram",
+            json={"keywords": ["AI"], "limit_per_channel": 10},
+        )
+        assert fetch_res.status_code == 200
+        stats = fetch_res.json()
+        assert stats["sources_checked"] == 1
+        assert stats["total_found"] == 2
+        assert stats["relevant_matched"] == 1
+        assert stats["new_saved"] == 1
+
+    # 3. Verify news item is saved in database and retrieved
+    get_res = await client.get("/api/news")
+    assert get_res.status_code == 200
+    news = get_res.json()
+    assert any(item["url"] == "https://t.me/techtg/1" for item in news)
+
+
+@pytest.mark.asyncio
+async def test_fetch_news_via_source_type_parameter(client: AsyncClient):
+    # Create Telegram source
+    await client.post("/api/sources", json={"name": "Auto TG", "url": "t.me/autotg", "type": "tg"})
+
+    item = NewsItemCreate(
+        title="Тест параметру source_type",
+        summary="Опис новини",
+        raw_text="Повний текст",
+        url="https://t.me/autotg/99",
+        source="autotg",
+    )
+
+    @asynccontextmanager
+    async def mock_tg_conn(*args, **kwargs):
+        yield AsyncMock()
+
+    with (
+        patch("app.services.news_service.get_telegram_client", side_effect=mock_tg_conn),
+        patch("app.services.news_service.fetch_channel_posts", new=AsyncMock(return_value=[item])),
+    ):
+        # Fetch using POST /api/news/fetch with source_type="tg"
+        res = await client.post("/api/news/fetch", json={"source_type": "tg"})
+        assert res.status_code == 200
+        stats = res.json()
+        assert stats["sources_checked"] == 1
+        assert stats["total_found"] == 1
+        assert stats["new_saved"] == 1
+
