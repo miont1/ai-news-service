@@ -151,3 +151,26 @@ async def test_generate_post_status_error():
     generator = PostGenerator(client=mock_client)
     with pytest.raises(AIGenerationError):
         await generator.generate_post(title="Заголовок", content="Опис")
+
+
+@pytest.mark.asyncio
+async def test_generate_post_prompt_structure_and_safety_tags():
+    mock_client = MagicMock()
+    mock_client.chat.completions.create = AsyncMock(
+        return_value=create_mock_completion_response("Сгенерований пост")
+    )
+
+    generator = PostGenerator(client=mock_client)
+
+    # 1. System prompt contains requirements for 3-4 sentences and prompt injection defense
+    assert "3-4 змістовних речення" in generator.system_prompt
+    assert "PROMPT INJECTION DEFENSE" in generator.system_prompt
+    assert "<article_data>" in generator.system_prompt
+
+    # 2. User message wraps article content in safety delimiter tags
+    await generator.generate_post(title="Новина", content="Текст статті", source_url="https://ex.com")
+    call_kwargs = mock_client.chat.completions.create.call_args.kwargs
+    user_content = next(m["content"] for m in call_kwargs["messages"] if m["role"] == "user")
+    assert user_content.startswith("<article_data>")
+    assert user_content.endswith("</article_data>")
+

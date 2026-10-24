@@ -5,7 +5,9 @@ from typing import Any
 from sqlalchemy.ext.asyncio import AsyncSession
 from telethon.errors import RPCError
 
+from app.ai.ranker import AINewsRanker
 from app.api.schemas import FailedSourceInfo, NewsItemCreate
+from app.config import settings
 from app.models import SourceType
 from app.news_parser.exceptions import TelegramParserError
 from app.news_parser.sites import fetch_rss_feed, populate_articles_raw_text
@@ -22,16 +24,23 @@ logger = logging.getLogger(__name__)
 
 
 class NewsService:
-    def __init__(self, session: AsyncSession):
+    def __init__(
+        self,
+        session: AsyncSession,
+        ai_ranker: AINewsRanker | None = None,
+    ):
         self.session = session
         self.news_repo = NewsRepository(session)
         self.source_repo = SourceRepository(session)
         self.keyword_repo = KeywordRepository(session)
+        self.ai_ranker = ai_ranker or AINewsRanker()
 
     async def fetch_and_store_site_news(
         self,
         keywords: list[str] | None = None,
         use_db_keywords: bool = False,
+        use_ai_filter: bool | None = None,
+        top_k: int | None = None,
     ) -> dict:
         # 1. Get active sources of type SITE
         sources = await self.source_repo.get_active_sources(SourceType.SITE)
@@ -134,10 +143,24 @@ class NewsService:
                 "message": "All relevant items already exist in database",
             }
 
-        # 6. Fetch full text (raw_text) ONLY for new relevant items
+        # 6. AI Ranking & Filtering (select top_k breaking news before scraping raw_text)
+        ai_filter_active = (
+            use_ai_filter if use_ai_filter is not None else settings.AI_FILTER_ENABLED
+        )
+        resolved_top_k = top_k if top_k is not None else settings.AI_FILTER_TOP_K
+
+        if ai_filter_active and len(new_items) > resolved_top_k:
+            logger.info(
+                "Ranking %s candidate site articles with AI to select top %s...",
+                len(new_items),
+                resolved_top_k,
+            )
+            new_items = await self.ai_ranker.rank_news(new_items, top_k=resolved_top_k)
+
+        # 7. Fetch full text (raw_text) ONLY for new relevant (and AI-filtered) items
         items_with_text = await populate_articles_raw_text(new_items)
 
-        # 7. Save to database via repository
+        # 8. Save to database via repository
         saved_items = await self.news_repo.save_news_items(items_with_text)
 
         return {
@@ -157,6 +180,8 @@ class NewsService:
         keywords: list[str] | None = None,
         use_db_keywords: bool = False,
         client: Any = None,
+        use_ai_filter: bool | None = None,
+        top_k: int | None = None,
     ) -> dict:
         """Fetch, filter, deduplicate and store news from active Telegram channels."""
         # 1. Get active sources of type TG
@@ -304,6 +329,20 @@ class NewsService:
                 "failed_sources": failed_sources,
                 "message": "All relevant Telegram items already exist in database",
             }
+
+        # 6.5 AI Ranking & Filtering (select top_k breaking posts before saving)
+        ai_filter_active = (
+            use_ai_filter if use_ai_filter is not None else settings.AI_FILTER_ENABLED
+        )
+        resolved_top_k = top_k if top_k is not None else settings.AI_FILTER_TOP_K
+
+        if ai_filter_active and len(new_items) > resolved_top_k:
+            logger.info(
+                "Ranking %s candidate Telegram posts with AI to select top %s...",
+                len(new_items),
+                resolved_top_k,
+            )
+            new_items = await self.ai_ranker.rank_news(new_items, top_k=resolved_top_k)
 
         # 7. Save to database via repository (raw_text is already populated for Telegram)
         saved_items = await self.news_repo.save_news_items(new_items)

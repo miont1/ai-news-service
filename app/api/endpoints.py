@@ -1,6 +1,6 @@
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, status
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -22,6 +22,7 @@ from app.api.schemas import (
     NewsFetchRequest,
     NewsFetchResult,
     NewsItemResponse,
+    PostPublishRequest,
     PostResponse,
     SourceCreate,
     SourceResponse,
@@ -31,6 +32,17 @@ from app.database import get_db
 from app.models import Keyword, Source, SourceType, StatusType
 from app.repositories import NewsRepository, PostRepository
 from app.services import NewsService
+from app.telegram.exceptions import (
+    PostAlreadyPublishedError,
+    PostNotFoundError,
+    TelegramChannelValidationError,
+    TelegramPublishChannelError,
+    TelegramPublishError,
+    TelegramPublishFloodWaitError,
+    TelegramPublishForbiddenError,
+    TelegramPublishUnauthorizedError,
+)
+from app.telegram.publisher import TelegramPublisher
 
 news_router = APIRouter(
     prefix="/api",
@@ -228,6 +240,8 @@ async def fetch_site_news(
     keywords = request.keywords if request else None
     use_db_keywords = request.use_db_keywords if request else False
     source_type = request.source_type if request else None
+    use_ai_filter = request.use_ai_filter if request else None
+    top_k = request.top_k if request else None
 
     if source_type == SourceType.TG:
         limit = request.limit_per_channel if request else 20
@@ -237,11 +251,15 @@ async def fetch_site_news(
             min_text_length=min_length,
             keywords=keywords,
             use_db_keywords=use_db_keywords,
+            use_ai_filter=use_ai_filter,
+            top_k=top_k,
         )
 
     return await service.fetch_and_store_site_news(
         keywords=keywords,
         use_db_keywords=use_db_keywords,
+        use_ai_filter=use_ai_filter,
+        top_k=top_k,
     )
 
 
@@ -260,11 +278,15 @@ async def fetch_telegram_news(
     use_db_keywords = request.use_db_keywords if request else False
     limit = request.limit_per_channel if request else 20
     min_length = request.min_text_length if request else 200
+    use_ai_filter = request.use_ai_filter if request else None
+    top_k = request.top_k if request else None
     return await service.fetch_and_store_telegram_news(
         limit_per_channel=limit,
         min_text_length=min_length,
         keywords=keywords,
         use_db_keywords=use_db_keywords,
+        use_ai_filter=use_ai_filter,
+        top_k=top_k,
     )
 
 
@@ -436,4 +458,58 @@ async def get_post_by_id(
             detail=f"Post with id {post_id} not found",
         )
     return post
+
+
+@news_router.post(
+    "/posts/{post_id}/publish",
+    response_model=PostResponse,
+    status_code=status.HTTP_200_OK,
+    tags=["Posts"],
+    summary="Publish post to Telegram channel",
+)
+async def publish_post_endpoint(
+    post_id: int,
+    db: SessionDep,
+    request: PostPublishRequest | None = Body(default=None),
+):
+    publisher = TelegramPublisher(db)
+    target_channel = request.target_channel if request else None
+
+    try:
+        return await publisher.publish_post(post_id=post_id, target_channel=target_channel)
+    except PostNotFoundError as e:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(e),
+        )
+    except PostAlreadyPublishedError as e:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(e),
+        )
+    except TelegramChannelValidationError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        )
+    except TelegramPublishForbiddenError as e:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=str(e),
+        )
+    except TelegramPublishFloodWaitError as e:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=str(e),
+        )
+    except (
+        TelegramPublishChannelError,
+        TelegramPublishUnauthorizedError,
+        TelegramPublishError,
+    ) as e:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=str(e),
+        )
+
 

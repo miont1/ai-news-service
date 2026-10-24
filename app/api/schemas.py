@@ -16,6 +16,8 @@ class NewsItemBase(BaseModel):
         description="Published time"
     )
     raw_text: str | None = Field(default=None, description="Full text of article")
+    ai_score: float | None = Field(default=None, description="AI relevance score (1.0 to 10.0)")
+    ai_reason: str | None = Field(default=None, description="AI ranking reason/justification")
 
 class NewsItemCreate(NewsItemBase):
     id: str | None = Field(default=None, description="News ID")
@@ -148,6 +150,16 @@ class NewsFetchRequest(BaseModel):
         ge=0,
         description="Minimum text length in characters (excluding URLs) for Telegram news items.",
     )
+    use_ai_filter: bool | None = Field(
+        default=None,
+        description="Optional override to enable/disable AI ranking of breaking news. Defaults to settings.AI_FILTER_ENABLED.",
+    )
+    top_k: int | None = Field(
+        default=None,
+        ge=1,
+        le=50,
+        description="Number of top AI-ranked news items to keep and save. Defaults to settings.AI_FILTER_TOP_K (3).",
+    )
 
 
 class FailedSourceInfo(BaseModel):
@@ -180,6 +192,22 @@ class PostResponse(BaseModel):
     model_config = {
         "from_attributes": True
     }
+
+
+class PostPublishRequest(BaseModel):
+    target_channel: str | None = Field(
+        default=None,
+        description="Optional target Telegram channel username (@channel) or numeric ID (-100...). If omitted, uses TG_TARGET_CHANNEL from settings.",
+        examples=["@my_news_channel"],
+    )
+
+    @field_validator("target_channel", mode="before")
+    @classmethod
+    def clean_target_channel(cls, v: str | None) -> str | None:
+        if isinstance(v, str):
+            cleaned = v.strip()
+            return cleaned if cleaned else None
+        return v
 
 
 class GenerateFromNewsRequest(BaseModel):

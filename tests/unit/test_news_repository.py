@@ -90,3 +90,25 @@ async def test_get_existing_urls(db_session: AsyncSession):
     existing = await repo.get_existing_urls(["https://ex.com/article-1", "https://ex.com/article-2"])
     assert existing == {"https://ex.com/article-1"}
 
+
+@pytest.mark.asyncio
+async def test_save_news_item_with_ai_score_and_reason(db_session: AsyncSession):
+    repo = NewsRepository(db_session)
+    item = NewsItemCreate(
+        title="Top AI News",
+        summary="Summary of important news",
+        url="https://ex.com/ai-1",
+        source="src",
+        ai_score=9.5,
+        ai_reason="Термінова подія національного значення",
+    )
+    saved = await repo.save_news_items([item])
+    assert len(saved) == 1
+    assert saved[0].ai_score == 9.5
+    assert saved[0].ai_reason == "Термінова подія національного значення"
+
+    fetched = await repo.get_by_id(item.id)
+    assert fetched is not None
+    assert fetched.ai_score == 9.5
+    assert fetched.ai_reason == "Термінова подія національного значення"
+

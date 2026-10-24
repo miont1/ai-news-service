@@ -1,7 +1,7 @@
 import enum
 from datetime import datetime
 
-from sqlalchemy import DateTime, Enum, ForeignKey, String, Text
+from sqlalchemy import DateTime, Enum, Float, ForeignKey, String, Text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -35,6 +35,8 @@ class NewsItem(Base):
     source:  Mapped[str] = mapped_column(String(100))
     published_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     raw_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    ai_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    ai_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 class StatusType(str, enum.Enum):
     NEW = "new"

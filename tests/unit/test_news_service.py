@@ -505,5 +505,80 @@ async def test_telegram_news_partial_failure():
     service.news_repo.save_news_items.assert_awaited_once()
 
 
+@pytest.mark.asyncio
+async def test_fetch_site_news_with_ai_filter_ranks_and_only_scrapes_top_3():
+    mock_session = AsyncMock()
+    mock_ranker = AsyncMock()
+    service = NewsService(mock_session, ai_ranker=mock_ranker)
+
+    source = Source(id=1, name="Tech News", url="https://tech.com/rss", type=SourceType.SITE, enabled=True)
+    service.source_repo.get_active_sources = AsyncMock(return_value=[source])
+
+    # 5 items fetched from feed
+    feed_items = [
+        NewsItemCreate(id=f"site-{i}", title=f"Заголовок {i}", summary=f"Опис {i}", url=f"https://tech.com/{i}", source=source.url)
+        for i in range(5)
+    ]
+    # AI ranker picks top 3: items 4, 2, 0
+    top_3 = [feed_items[4], feed_items[2], feed_items[0]]
+    mock_ranker.rank_news.return_value = top_3
+
+    service.news_repo.get_existing_ids = AsyncMock(return_value=set())
+    service.news_repo.get_existing_urls = AsyncMock(return_value=set())
+    service.news_repo.save_news_items = AsyncMock(return_value=top_3)
+
+    mock_populate = AsyncMock(side_effect=lambda items: items)
+
+    with (
+        patch("app.services.news_service.fetch_rss_feed", new=AsyncMock(return_value=feed_items)),
+        patch("app.services.news_service.populate_articles_raw_text", new=mock_populate),
+    ):
+        result = await service.fetch_and_store_site_news(use_ai_filter=True, top_k=3)
+
+    # Verify AI ranker was called with all 5 candidates
+    mock_ranker.rank_news.assert_awaited_once_with(feed_items, top_k=3)
+
+    # Verify populate_articles_raw_text was ONLY called with the 3 top-ranked items!
+    mock_populate.assert_awaited_once_with(top_3)
+
+    # Verify 3 items were saved
+    service.news_repo.save_news_items.assert_awaited_once_with(top_3)
+    assert result["new_saved"] == 3
+
+
+@pytest.mark.asyncio
+async def test_fetch_telegram_news_with_ai_filter_ranks_and_saves_top_3():
+    mock_session = AsyncMock()
+    mock_ranker = AsyncMock()
+    service = NewsService(mock_session, ai_ranker=mock_ranker)
+
+    source = Source(id=1, name="TG News", url="@tg_chan", type=SourceType.TG, enabled=True)
+    service.source_repo.get_active_sources = AsyncMock(return_value=[source])
+
+    tg_items = [
+        NewsItemCreate(id=f"tg-{i}", title=f"ТГ {i}", summary=f"Опис {i}", raw_text=f"Текст {i}", url=f"https://t.me/tg/{i}", source="tg_chan")
+        for i in range(5)
+    ]
+    top_3 = [tg_items[1], tg_items[3], tg_items[0]]
+    mock_ranker.rank_news.return_value = top_3
+
+    service.news_repo.get_existing_ids = AsyncMock(return_value=set())
+    service.news_repo.get_existing_urls = AsyncMock(return_value=set())
+    service.news_repo.save_news_items = AsyncMock(return_value=top_3)
+
+    mock_client = AsyncMock()
+
+    with patch("app.services.news_service.fetch_channel_posts", new=AsyncMock(return_value=tg_items)):
+        result = await service.fetch_and_store_telegram_news(client=mock_client, use_ai_filter=True, top_k=3)
+
+    # Verify AI ranker was called with all 5 candidates
+    mock_ranker.rank_news.assert_awaited_once_with(tg_items, top_k=3)
+
+    # Verify 3 items were saved
+    service.news_repo.save_news_items.assert_awaited_once_with(top_3)
+    assert result["new_saved"] == 3
+
+
+
 
 

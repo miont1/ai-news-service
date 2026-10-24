@@ -133,3 +133,47 @@ async def test_fetch_raw_text_handles_network_errors():
     # 2. HTTP error during text extraction
     mock_client.get.side_effect = httpx.HTTPError("Network failure")
     assert await fetch_raw_text(mock_client, "https://example.com/article") == ""
+
+
+def test_clean_article_text():
+    from app.news_parser.sites import clean_article_text
+
+    raw = """
+    Вранці 24 жовтня армія РФ атакувала Київ.
+
+    Постраждали двоє людей.
+
+    Більше 50 рятувальників ліквідовували наслідки, і менше ніж за добу світло відновили.
+
+    Читайте також: У Дніпрі помер чоловік через атаку
+
+    Рятувальники ліквідували пожежу.
+    БІЛЬШЕ
+    МЕНШЕ
+    БІЛЬШЕ
+    МЕНШЕ
+
+    Той самий удар по столиці (фоторепортаж)
+
+    Форум
+    """
+
+    cleaned = clean_article_text(raw)
+
+    assert "Вранці 24 жовтня армія РФ атакувала Київ." in cleaned
+    assert "Постраждали двоє людей." in cleaned
+    assert "Рятувальники ліквідували пожежу." in cleaned
+    # Legitimate sentence containing 'Більше' and 'менше' must NOT be removed
+    assert "Більше 50 рятувальників ліквідовували наслідки, і менше ніж за добу світло відновили." in cleaned
+
+    # Noise must be stripped
+    assert "Читайте також" not in cleaned
+    assert "БІЛЬШЕ" not in cleaned
+    assert "МЕНШЕ" not in cleaned
+    assert "фоторепортаж" not in cleaned
+    assert "Форум" not in cleaned
+
+    # Empty inputs
+    assert clean_article_text("") == ""
+    assert clean_article_text("   \n\n  ") == ""
+
