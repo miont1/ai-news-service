@@ -1,77 +1,81 @@
 # AI News Telegram Automation Service (aibot)
 
-AI-сервіс для автоматизації Telegram-каналу новин. Сервіс збирає новини з активних RSS-стрічок та Telegram-каналів, проводить відбір за ключовими словами, виконує ШІ-ранжування новин за допомогою LLM (OpenAI), генерує готові пости для Telegram та публікує їх за розкладом через Celery, RabbitMQ та Telethon.
+An automated AI-driven service for managing Telegram news channels. The service aggregates news articles from active RSS feeds and public Telegram channels, filters and scores them using LLM-based AI ranking (OpenAI), generates concise and engaging Telegram posts, and publishes them on a schedule via Celery, RabbitMQ, and Telethon.
 
 ---
 
-## 🛠 Стек технологій
-- **Мова:** Python 3.14
-- **Пакетний менеджер:** `uv`
-- **Веб-фреймворк:** FastAPI, Uvicorn
-- **База даних:** PostgreSQL 16, SQLAlchemy 2.0 (asyncio, asyncpg), Alembic
-- **Брокер повідомлень та черги завдань:** Celery 5.4+, RabbitMQ 3 (Management)
-- **Парсинг:** Telethon (Telegram-канали), Selectolax, Trafilatura (RSS та веб-сторінки)
-- **ШІ-модулі:** OpenAI API (`gpt-4o-mini` / `gpt-5-nano`)
-- **Тестування:** pytest, pytest-asyncio (147 тестів, 100% pass)
+## 🛠 Technology Stack
+
+- **Language:** Python 3.14
+- **Package Manager:** `uv`
+- **Web Framework:** FastAPI, Uvicorn
+- **Database & ORM:** PostgreSQL 16, SQLAlchemy 2.0 (asyncio, asyncpg), Alembic
+- **Task Queue & Broker:** Celery 5.4+, RabbitMQ 3 (Management)
+- **Parsers:** Telethon (Telegram channels), Selectolax, Trafilatura (RSS feeds and websites)
+- **AI Modules:** OpenAI API (`gpt-4o-mini` / `gpt-5-nano`)
+- **Testing:** pytest, pytest-asyncio (147 tests, 100% pass)
 
 ---
 
-## 🚀 Архітектура черг (Celery + RabbitMQ)
+## 🚀 Pipeline & Queue Architecture (Celery + RabbitMQ)
 
-Сервіс використовує **Celery Chain** та відкладену публікацію через `apply_async(countdown=...)`:
+The service implements an asynchronous **Celery Chain** workflow coupled with delayed, staggered publications via `apply_async(countdown=...)`:
 
 1. **Celery Beat (`run-news-pipeline-every-30-mins`)**:
-   Запускається кожні 30 хвилин (`crontab(minute="*/30")`) та викликає ланцюжок завдань:
-   - **`fetch_and_rank_news_task`**: Збирає свіжі статті з активних сайтів (RSS) та Telegram-каналів. Якщо нових статей знайдено менше ніж 10, автоматично добирає з бази даних до 10 неопублікованих статей із найвищим балом ШІ. Оцінює та зберігає **всі** знайдені статті в БД (з полями `parsed_at`, `ai_score`, `ai_reason`) та відбирає ТОП-3 найкращі для публікації. Повертає список `[news_id, ...]`.
-   - **`generate_ai_posts_task`**: Отримує `news_ids`, викликає `PostGenerator` для кожної новини та створює пости в статусі `GENERATED`. Повертає список `[post_id, ...]`.
-   - **`schedule_posts_publication_task`**: Отримує список `post_ids` та планує окремі відкладені таски публікації з кроком у 10 хвилин:
-     - Пост 1: `countdown=0` (одразу)
-     - Пост 2: `countdown=600` (через 10 хв)
-     - Пост 3: `countdown=1200` (через 20 хв)
+   Runs every 30 minutes (`crontab(minute="*/30")`) and triggers the 3-step pipeline:
+   - **`fetch_and_rank_news_task`**: Gathers fresh articles from active website RSS feeds and Telegram channels. Evaluates all incoming articles using `AINewsRanker` (scoring 1.0–10.0 and generating justifications) and saves **all** evaluated articles to the database (with `parsed_at`, `ai_score`, `ai_reason`). If fewer than 10 fresh articles are found, it supplements the candidate pool with up to 10 top-rated unposted articles from the database. Selects the top 3 items for publication and returns `[news_id, ...]`.
+   - **`generate_ai_posts_task`**: Receives `news_ids`, invokes `PostGenerator` for each news item, and saves generated posts with status `GENERATED`. Returns `[post_id, ...]`.
+   - **`schedule_posts_publication_task`**: Takes `post_ids` and schedules staggered publication tasks spaced 10 minutes apart:
+     - Post 1: `countdown=0` (immediate)
+     - Post 2: `countdown=600` (after 10 minutes)
+     - Post 3: `countdown=1200` (after 20 minutes)
 
-2. **Таска публікації (`publish_post_task(post_id)`):**
-   - Викликає `TelegramPublisher(session).publish_post(post_id)`.
-   - Встановлює проміжний статус `PUBLISHING` (in-flight lock для захисту від race conditions та повторних публікацій).
-   - Публікує через Telethon у цільовий канал (`TG_TARGET_CHANNEL`).
-   - Фіксує фінальний статус `PUBLISHED` або `FAILED`.
-   - **Політика Retries**: автоматичний retry при `FloodWaitError` з інтервалом очікування `countdown=exc.seconds` (до 3 спроб) та експоненційний бекофф при тимчасових мережевих збоях.
+2. **Publishing Task (`publish_post_task(post_id)`):**
+   - Calls `TelegramPublisher(session).publish_post(post_id)`.
+   - Acquires an in-flight lock by setting intermediate status `PUBLISHING` to prevent race conditions and duplicate publications.
+   - Publishes the post to the configured Telegram channel (`TG_TARGET_CHANNEL`) via Telethon.
+   - Updates the final post status to `PUBLISHED` or `FAILED`.
+   - **Retry Policy**: Handles Telegram rate limits (`FloodWaitError`) with automatic retries scheduled with `countdown=exc.seconds` (up to 3 retries), along with exponential backoff for transient network errors.
 
-3. **Асинхронний міст (`app.utils.run_async`)**:
-   - Реалізує стабільний thread-local event loop для Celery-воркерів, гарантуючи ізоляцію та сумісність із пулом з'єднань SQLAlchemy `asyncpg` та клієнтом Telethon.
+3. **Async Bridge (`app.utils.run_async`)**:
+   - Manages a persistent thread-local event loop for Celery workers to ensure clean integration with async drivers (SQLAlchemy `asyncpg` connection pool and Telethon).
 
 ---
 
-## ⚙️ Встановлення та запуск
+## ⚙️ Installation & Running
 
-### Варіант 1: Все в одному через Docker Compose (Рекомендовано)
-Однією командою збирає і запускає всі 5 сервісів (`PostgreSQL`, `RabbitMQ`, `FastAPI`, `Celery Worker`, `Celery Beat`):
+### Option 1: Full Stack via Docker Compose (Recommended)
+Launch all 5 services (`PostgreSQL`, `RabbitMQ`, `FastAPI`, `Celery Worker`, `Celery Beat`) with a single command:
+
 ```bash
 cp .env.example .env
-# Заповніть ваші ключі в .env
+# Configure your API keys in .env
 docker compose up --build -d
 ```
-- Документація Swagger UI: [http://localhost:8000/docs](http://localhost:8000/docs)
-- RabbitMQ Management UI: [http://localhost:15672](http://localhost:15672) (гість: `guest` / `guest`)
-- Перегляд логів: `docker compose logs -f`
-- Зупинка: `docker compose down`
+
+- **Swagger UI Documentation:** [http://localhost:8000/docs](http://localhost:8000/docs)
+- **RabbitMQ Management Dashboard:** [http://localhost:15672](http://localhost:15672) (credentials: `guest` / `guest`)
+- **View Container Logs:** `docker compose logs -f`
+- **Stop Services:** `docker compose down`
 
 ---
 
-### Варіант 2: Локальний запуск для розробки
+### Option 2: Local Development Setup
 
-#### 1. Запуск інфраструктури (PostgreSQL + RabbitMQ)
+#### 1. Start Infrastructure (PostgreSQL + RabbitMQ)
 ```bash
 docker compose up -d db rabbitmq
 ```
 
-#### 2. Встановлення залежностей та міграції
+#### 2. Install Dependencies & Run Database Migrations
 ```bash
 uv sync
 uv run alembic upgrade head
 ```
 
-#### 3. Запуск сервісів у терміналах
-- **Web API:**
+#### 3. Start Application Services
+In separate terminal windows:
+- **FastAPI Web API:**
   ```bash
   uv run uvicorn app.main:app --reload --port 8000
   ```
@@ -79,17 +83,44 @@ uv run alembic upgrade head
   ```bash
   uv run celery -A celery_worker.celery_app worker -l info -P solo
   ```
-- **Celery Beat:**
+  *(Note: `-P solo` is recommended on Windows to support asyncio/Telethon in the worker process).*
+- **Celery Beat (Scheduler):**
   ```bash
   uv run celery -A celery_worker.celery_app beat -l info
   ```
 
 ---
 
-## 🧪 Запуск тестів
+## 📡 REST API Endpoints
 
-Для запуску всіх unit- та integration-тестів виконайте:
+The API is fully documented via interactive Swagger UI at `/docs`:
+
+- **News Management:**
+  - `GET /api/news`: Retrieve parsed news ordered by `parsed_at` descending (supports `limit` and `offset`).
+  - `POST /api/news/fetch`: Manually trigger news scraping from RSS sites.
+  - `POST /api/news/fetch/telegram`: Manually trigger news scraping from Telegram channels.
+- **AI Generation:**
+  - `POST /api/generate`: Generate a Telegram post draft on demand for a custom article.
+- **Post Management & Publishing:**
+  - `GET /api/posts`: View generated post history with status filtering (`new`, `generated`, `publishing`, `published`, `failed`).
+  - `POST /api/posts/{post_id}/publish`: Manually publish an individual post to Telegram.
+- **Source Management:**
+  - `GET /api/sources`: List configured news sources (sites and Telegram channels).
+  - `POST /api/sources`: Add a new news source.
+  - `PUT /api/sources/{source_id}`: Update or toggle source enabled state.
+  - `DELETE /api/sources/{source_id}`: Remove a news source.
+- **Keyword Filtering:**
+  - `GET /api/keywords`: List active keyword filters.
+  - `POST /api/keywords`: Add a keyword filter.
+  - `DELETE /api/keywords/{keyword_id}`: Delete a keyword filter.
+
+---
+
+## 🧪 Testing
+
+Run the automated test suite using `pytest`:
 ```bash
 uv run pytest
 ```
-Усі 147 тестів виконуються ізольовано у пам'яті через SQLite in-memory з повною підтримкою async.
+
+All **147 unit and integration tests** run in an isolated environment using SQLite in-memory with full async support.
