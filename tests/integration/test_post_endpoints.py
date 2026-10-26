@@ -375,6 +375,25 @@ async def test_publish_post_endpoint_conflict_already_published(client: AsyncCli
 
 
 @pytest.mark.asyncio
+async def test_publish_post_endpoint_conflict_publishing_in_progress(client: AsyncClient):
+    from app.telegram.exceptions import PostPublishingInProgressError
+
+    with patch(
+        "app.api.endpoints.TelegramPublisher.publish_post",
+        new_callable=AsyncMock,
+    ) as mock_publish:
+        mock_publish.side_effect = PostPublishingInProgressError("Post 1 is currently being published. Concurrent publishing blocked.")
+
+        response = await client.post(
+            "/api/posts/1/publish",
+            json={"target_channel": "@channel"},
+        )
+
+        assert response.status_code == 409
+        assert "currently being published" in response.json()["detail"].lower()
+
+
+@pytest.mark.asyncio
 async def test_publish_post_endpoint_bad_request_missing_channel(client: AsyncClient):
     from app.telegram.exceptions import TelegramChannelValidationError
 

@@ -22,6 +22,7 @@ from app.repositories.post_repository import PostRepository
 from app.telegram.exceptions import (
     PostAlreadyPublishedError,
     PostNotFoundError,
+    PostPublishingInProgressError,
     TelegramChannelValidationError,
     TelegramPublishChannelError,
     TelegramPublishError,
@@ -169,6 +170,48 @@ async def test_publish_post_already_published_blocks_duplicate(db_session: Async
     # Status should remain PUBLISHED, not modified or failed
     refreshed = await post_repo.get_by_id(post.id)
     assert refreshed.status == StatusType.PUBLISHED
+
+
+@pytest.mark.asyncio
+async def test_publish_post_publishing_in_progress_blocks_duplicate(db_session: AsyncSession):
+    post = await _create_test_post(db_session, news_id="pub-already-in-progress")
+    post_repo = PostRepository(db_session)
+    await post_repo.update_status(post.id, StatusType.PUBLISHING)
+
+    mock_client = AsyncMock()
+    publisher = TelegramPublisher(session=db_session, client=mock_client)
+
+    with pytest.raises(PostPublishingInProgressError, match="Concurrent publishing blocked"):
+        await publisher.publish_post(post.id, target_channel="@target")
+
+    mock_client.send_message.assert_not_awaited()
+    # Status should remain PUBLISHING
+    refreshed = await post_repo.get_by_id(post.id)
+    assert refreshed.status == StatusType.PUBLISHING
+
+
+@pytest.mark.asyncio
+async def test_publish_post_transitions_through_publishing_status(db_session: AsyncSession):
+    post = await _create_test_post(db_session, news_id="pub-transition-check")
+    mock_client = AsyncMock()
+    post_repo = PostRepository(db_session)
+
+    intermediate_status = None
+
+    async def fake_send_message(*args, **kwargs):
+        nonlocal intermediate_status
+        current = await post_repo.get_by_id(post.id)
+        intermediate_status = current.status
+
+    mock_client.send_message = AsyncMock(side_effect=fake_send_message)
+    publisher = TelegramPublisher(session=db_session, client=mock_client)
+
+    published = await publisher.publish_post(post.id, target_channel="@target")
+
+    # While sending, status must have been PUBLISHING
+    assert intermediate_status == StatusType.PUBLISHING
+    # After completion, status is PUBLISHED
+    assert published.status == StatusType.PUBLISHED
 
 
 @pytest.mark.asyncio

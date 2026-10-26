@@ -29,6 +29,7 @@ from app.repositories.post_repository import PostRepository
 from app.telegram.exceptions import (
     PostAlreadyPublishedError,
     PostNotFoundError,
+    PostPublishingInProgressError,
     TelegramChannelValidationError,
     TelegramPublishChannelError,
     TelegramPublishError,
@@ -112,6 +113,7 @@ class TelegramPublisher:
         Raises:
             PostNotFoundError: If post_id does not exist in the database.
             PostAlreadyPublishedError: If post is already in PUBLISHED status (deduplication).
+            PostPublishingInProgressError: If post is currently in PUBLISHING status (in-flight lock).
             TelegramChannelValidationError: If target channel is not specified or configured.
             TelegramPublishForbiddenError: If lacking permissions to post in the channel.
             TelegramPublishChannelError: If channel is private, invalid, or does not exist.
@@ -124,10 +126,14 @@ class TelegramPublisher:
         if not post:
             raise PostNotFoundError(f"Post with id {post_id} not found")
 
-        # 2. Validation & Deduplication: block if already published
+        # 2. Validation & Deduplication: block if already published or in progress
         if post.status == StatusType.PUBLISHED:
             raise PostAlreadyPublishedError(
                 f"Post {post_id} has already been published at {post.published_at}. Duplicate publishing blocked."
+            )
+        if post.status == StatusType.PUBLISHING:
+            raise PostPublishingInProgressError(
+                f"Post {post_id} is currently in the process of being published. Concurrent publishing blocked."
             )
 
         # 3. Determine target channel (argument override or configuration fallback)
@@ -143,7 +149,13 @@ class TelegramPublisher:
             await self._mark_failed(post_id)
             raise TelegramPublishError(f"Post {post_id} has empty generated_text; cannot publish.")
 
-        # 4. Publish via Telethon client
+        # 4. Set intermediate PUBLISHING status in DB before calling Telegram to prevent race conditions
+        await self.post_repo.update_status(
+            post_id=post.id,
+            status=StatusType.PUBLISHING,
+        )
+
+        # 5. Publish via Telethon client
         try:
             async with get_telegram_client(self.client) as tg_client:
                 await tg_client.send_message(

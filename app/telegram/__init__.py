@@ -1,11 +1,12 @@
 from app.telegram.exceptions import (
     PostAlreadyPublishedError,
     PostNotFoundError,
+    PostPublishingInProgressError,
     TelegramChannelValidationError,
     TelegramPublishChannelError,
     TelegramPublishError,
-    TelegramPublishForbiddenError,
     TelegramPublishFloodWaitError,
+    TelegramPublishForbiddenError,
     TelegramPublishUnauthorizedError,
 )
 from app.telegram.publisher import TelegramPublisher, normalize_target_channel
@@ -13,6 +14,7 @@ from app.telegram.publisher import TelegramPublisher, normalize_target_channel
 __all__ = [
     "PostAlreadyPublishedError",
     "PostNotFoundError",
+    "PostPublishingInProgressError",
     "TelegramChannelValidationError",
     "TelegramPublishChannelError",
     "TelegramPublishError",

@@ -3,7 +3,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.schemas import NewsItemCreate
-from app.models import NewsItem
+from app.models import NewsItem, Post
 
 
 class NewsRepository:
@@ -53,9 +53,33 @@ class NewsRepository:
     async def get_news(self, limit: int = 50, offset: int = 0) -> list[NewsItem]:
         query = (
             select(NewsItem)
-            .order_by(NewsItem.published_at.desc())
+            .order_by(NewsItem.parsed_at.desc(), NewsItem.published_at.desc())
             .limit(limit)
             .offset(offset)
+        )
+        result = await self.session.execute(query)
+        return list(result.scalars().all())
+
+    async def get_unposted_top_news(
+        self,
+        limit: int = 10,
+        exclude_ids: list[str] | set[str] | None = None,
+    ) -> list[NewsItem]:
+        """Fetch top news from DB that have no corresponding Post, ordered by ai_score descending."""
+        query = (
+            select(NewsItem)
+            .outerjoin(Post, NewsItem.id == Post.news_id)
+            .where(Post.id.is_(None))
+        )
+        if exclude_ids:
+            clean_exclude = [eid for eid in exclude_ids if eid]
+            if clean_exclude:
+                query = query.where(NewsItem.id.not_in(clean_exclude))
+
+        query = (
+            query
+            .order_by(NewsItem.ai_score.desc().nullslast(), NewsItem.parsed_at.desc())
+            .limit(limit)
         )
         result = await self.session.execute(query)
         return list(result.scalars().all())

@@ -111,4 +111,85 @@ async def test_save_news_item_with_ai_score_and_reason(db_session: AsyncSession)
     assert fetched is not None
     assert fetched.ai_score == 9.5
     assert fetched.ai_reason == "Термінова подія національного значення"
+    assert fetched.parsed_at is not None
+
+
+@pytest.mark.asyncio
+async def test_get_news_orders_by_parsed_at_desc(db_session: AsyncSession):
+    repo = NewsRepository(db_session)
+    t1 = datetime(2026, 1, 1, 10, 0, 0, tzinfo=UTC)
+    t2 = datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC)
+
+    item_older = NewsItemCreate(
+        title="Older Parsed",
+        summary="Parsed earlier",
+        url="https://ex.com/older",
+        source="src",
+        parsed_at=t1,
+    )
+    item_newer = NewsItemCreate(
+        title="Newer Parsed",
+        summary="Parsed later",
+        url="https://ex.com/newer",
+        source="src",
+        parsed_at=t2,
+    )
+
+    await repo.save_news_items([item_older, item_newer])
+
+    news = await repo.get_news(limit=10)
+    assert len(news) >= 2
+    assert news[0].title == "Newer Parsed"
+    assert news[1].title == "Older Parsed"
+    assert news[0].parsed_at > news[1].parsed_at
+
+
+@pytest.mark.asyncio
+async def test_get_unposted_top_news(db_session: AsyncSession):
+    repo = NewsRepository(db_session)
+
+    item_posted = NewsItemCreate(
+        id="news-posted",
+        title="Already Posted News",
+        summary="S1",
+        url="https://ex.com/p",
+        source="src",
+        ai_score=10.0,
+    )
+    item_unposted_high = NewsItemCreate(
+        id="news-unposted-high",
+        title="Unposted High Score",
+        summary="S2",
+        url="https://ex.com/u1",
+        source="src",
+        ai_score=9.0,
+    )
+    item_unposted_low = NewsItemCreate(
+        id="news-unposted-low",
+        title="Unposted Low Score",
+        summary="S3",
+        url="https://ex.com/u2",
+        source="src",
+        ai_score=6.0,
+    )
+
+    await repo.save_news_items([item_posted, item_unposted_high, item_unposted_low])
+
+    # Create a Post for item_posted
+    from app.models import Post, StatusType
+    post = Post(news_id="news-posted", generated_text="Text", status=StatusType.PUBLISHED)
+    db_session.add(post)
+    await db_session.commit()
+
+    # Query unposted
+    unposted = await repo.get_unposted_top_news(limit=10)
+    assert len(unposted) == 2
+    assert unposted[0].id == "news-unposted-high"
+    assert unposted[1].id == "news-unposted-low"
+
+    # With exclude_ids
+    unposted_filtered = await repo.get_unposted_top_news(limit=10, exclude_ids=["news-unposted-high"])
+    assert len(unposted_filtered) == 1
+    assert unposted_filtered[0].id == "news-unposted-low"
+
 

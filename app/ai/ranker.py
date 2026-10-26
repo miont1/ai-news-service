@@ -105,16 +105,18 @@ class AINewsRanker:
     async def rank_news(
         self,
         items: list[NewsItemCreate],
-        top_k: int = 3,
+        top_k: int | None = 3,
+        force_eval: bool = False,
     ) -> list[NewsItemCreate]:
         """Rank news items with LLM and return the top_k most relevant items with ai_score and ai_reason.
 
-        If items count is <= top_k, returns items as-is without calling LLM.
+        Populates ai_score and ai_reason on all items in the input list.
+        If items count is <= top_k and force_eval is False, returns items as-is without calling LLM.
         If LLM evaluation fails, gracefully falls back to the first top_k items.
         """
         if not items:
             return []
-        if len(items) <= top_k:
+        if not force_eval and top_k is not None and len(items) <= top_k:
             return items
 
         user_message = self._build_user_message(items)
@@ -126,7 +128,7 @@ class AINewsRanker:
                 {"role": "user", "content": user_message},
             ],
             "response_format": {"type": "json_object"},
-            "max_completion_tokens": 1500,
+            "max_completion_tokens": 4000,
         }
 
         is_reasoning_model = any(
@@ -148,24 +150,21 @@ class AINewsRanker:
             evaluations = self._parse_evaluations(raw_text, len(items))
             logger.info("AI scored %s items successfully.", len(evaluations))
 
+            # Populate scores and reasons for ALL items in-place
+            for idx, item in enumerate(items):
+                eval_data = evaluations.get(idx)
+                if eval_data:
+                    item.ai_score = eval_data["score"]
+                    item.ai_reason = eval_data["reason"]
+
             # Sort indices descending by score (default score 5.0 for unscored items)
             ranked_indices = sorted(
                 range(len(items)),
                 key=lambda i: evaluations.get(i, {}).get("score", 5.0),
                 reverse=True,
             )
-            top_indices = ranked_indices[:top_k]
-
-            selected_items: list[NewsItemCreate] = []
-            for i in top_indices:
-                item = items[i]
-                eval_data = evaluations.get(i)
-                if eval_data:
-                    item.ai_score = eval_data["score"]
-                    item.ai_reason = eval_data["reason"]
-                selected_items.append(item)
-
-            return selected_items
+            top_indices = ranked_indices[:top_k] if top_k is not None else ranked_indices
+            return [items[i] for i in top_indices]
 
         except Exception as e:
             logger.warning(
@@ -174,4 +173,4 @@ class AINewsRanker:
                 e,
                 top_k,
             )
-            return items[:top_k]
+            return items[:top_k] if top_k is not None else items

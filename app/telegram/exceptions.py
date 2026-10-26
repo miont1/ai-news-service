@@ -10,6 +10,10 @@ class PostAlreadyPublishedError(TelegramPublishError):
     """Raised when trying to publish a post that is already published."""
 
 
+class PostPublishingInProgressError(TelegramPublishError):
+    """Raised when trying to publish a post that is currently in PUBLISHING status."""
+
+
 class TelegramChannelValidationError(TelegramPublishError):
     """Raised when the target channel is missing or not configured."""
 

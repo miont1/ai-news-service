@@ -35,6 +35,7 @@ from app.services import NewsService
 from app.telegram.exceptions import (
     PostAlreadyPublishedError,
     PostNotFoundError,
+    PostPublishingInProgressError,
     TelegramChannelValidationError,
     TelegramPublishChannelError,
     TelegramPublishError,
@@ -482,7 +483,7 @@ async def publish_post_endpoint(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=str(e),
         )
-    except PostAlreadyPublishedError as e:
+    except (PostAlreadyPublishedError, PostPublishingInProgressError) as e:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=str(e),

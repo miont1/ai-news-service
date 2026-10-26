@@ -15,6 +15,10 @@ class NewsItemBase(BaseModel):
         default_factory=lambda: datetime.now(UTC),
         description="Published time"
     )
+    parsed_at: datetime = Field(
+        default_factory=lambda: datetime.now(UTC),
+        description="Time when the news was parsed/collected"
+    )
     raw_text: str | None = Field(default=None, description="Full text of article")
     ai_score: float | None = Field(default=None, description="AI relevance score (1.0 to 10.0)")
     ai_reason: str | None = Field(default=None, description="AI ranking reason/justification")

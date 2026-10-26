@@ -16,6 +16,10 @@ class Settings(BaseSettings):
     TG_SESSION_STRING: str | None = None
     TG_TARGET_CHANNEL: str | None = None
 
+    # Celery & RabbitMQ
+    CELERY_BROKER_URL: str = "amqp://guest:guest@localhost:5672//"
+    CELERY_RESULT_BACKEND: str | None = None
+
     model_config = SettingsConfigDict(
         env_file=".env",
         extra="ignore",

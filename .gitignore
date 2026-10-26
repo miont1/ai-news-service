@@ -13,3 +13,6 @@ wheels/
 # Telethon sessions
 *.session
 *.session-journal
+
+# Celery Beat schedule database
+celerybeat-schedule*

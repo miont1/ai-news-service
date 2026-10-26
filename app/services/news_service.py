@@ -359,3 +359,163 @@ class NewsService:
             "message": f"Successfully parsed, filtered and saved {len(saved_items)} news items from Telegram",
         }
 
+    async def fetch_and_rank_pipeline_news(
+        self,
+        top_k: int | None = None,
+        use_db_keywords: bool = False,
+        keywords: list[str] | None = None,
+        limit_per_channel: int = 20,
+        min_text_length: int = 200,
+        client: Any = None,
+    ) -> list[str]:
+        """Fetch candidates from active Sites and Telegram sources, rank joint top_k, and persist.
+
+        Returns:
+            list[str]: IDs of the saved top news items.
+        """
+        # 1. Determine keywords filter (disabled by default)
+        if use_db_keywords:
+            active_keywords = await self.keyword_repo.get_all_words()
+        elif keywords:
+            active_keywords = [k.strip() for k in keywords if k.strip()]
+        else:
+            active_keywords = []
+
+        # 2. Active sources
+        site_sources = await self.source_repo.get_active_sources(SourceType.SITE)
+        tg_sources = await self.source_repo.get_active_sources(SourceType.TG)
+
+        site_items: list[NewsItemCreate] = []
+        if site_sources:
+            tasks = [fetch_rss_feed(source.url) for source in site_sources]
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            for source, res in zip(site_sources, results):
+                if isinstance(res, Exception):
+                    logger.warning("Error fetching RSS feed %s: %s", source.url, res)
+                else:
+                    site_items.extend(res)
+
+        tg_items: list[NewsItemCreate] = []
+        if tg_sources:
+            async def _fetch_tg_all(tg_c: Any) -> list[Any]:
+                tg_tasks = [
+                    fetch_channel_posts(
+                        tg_c,
+                        source.url,
+                        limit=limit_per_channel,
+                        min_text_length=min_text_length,
+                    )
+                    for source in tg_sources
+                ]
+                return await asyncio.gather(*tg_tasks, return_exceptions=True)
+
+            try:
+                if client is not None:
+                    results = await _fetch_tg_all(client)
+                else:
+                    async with get_telegram_client() as tg_client:
+                        results = await _fetch_tg_all(tg_client)
+
+                for source, res in zip(tg_sources, results):
+                    if isinstance(res, Exception):
+                        logger.warning("Error fetching TG channel %s: %s", source.url, res)
+                    else:
+                        tg_items.extend(res)
+            except Exception as tg_err:
+                logger.error("Error connecting Telegram client in pipeline: %s", tg_err)
+
+        all_items = site_items + tg_items
+        if not all_items:
+            logger.info("Pipeline found 0 items across all sources.")
+            return []
+
+        # 3. Filter by keywords
+        relevant_items = filter_relevant_news(all_items, active_keywords)
+        if not relevant_items:
+            logger.info("None of the %d items matched configured keywords.", len(all_items))
+            return []
+
+        # 4. Deduplicate
+        unique_batch_items: dict[str, NewsItemCreate] = {}
+        seen_batch_urls: set[str] = set()
+        for item in relevant_items:
+            if item.url and item.url in seen_batch_urls:
+                continue
+            if item.id and item.id not in unique_batch_items:
+                unique_batch_items[item.id] = item
+                if item.url:
+                    seen_batch_urls.add(item.url)
+
+        existing_ids = await self.news_repo.get_existing_ids(list(unique_batch_items.keys()))
+        batch_urls = [item.url for item in unique_batch_items.values() if item.url]
+        existing_urls = await self.news_repo.get_existing_urls(batch_urls)
+
+        candidates = [
+            item
+            for item_id, item in unique_batch_items.items()
+            if item_id not in existing_ids and (not item.url or item.url not in existing_urls)
+        ]
+
+        resolved_top_k = top_k if top_k is not None else settings.AI_FILTER_TOP_K
+        ai_filter_active = settings.AI_FILTER_ENABLED
+
+        # 5. Score and persist ALL fresh candidates in the database
+        if candidates:
+            if ai_filter_active:
+                logger.info("AI scoring %d fresh candidates...", len(candidates))
+                await self.ai_ranker.rank_news(candidates, top_k=None, force_eval=True)
+
+            # Populate raw text for site items if needed
+            items_to_populate = [c for c in candidates if not c.raw_text]
+            if items_to_populate:
+                await populate_articles_raw_text(items_to_populate)
+
+            # Save ALL fresh candidates to database
+            await self.news_repo.save_news_items(candidates)
+            logger.info("Saved %d fresh news items to database with AI evaluations.", len(candidates))
+        else:
+            logger.info("0 fresh candidates found across sources.")
+
+        # 6. Form selection pool for top-k posts:
+        # If fresh candidates < 10, pull up to 10 unposted top news from DB
+        pool: list[Any] = list(candidates)
+
+        if len(candidates) < 10:
+            fresh_ids = {c.id for c in candidates if c.id}
+            needed_from_db = 10
+            logger.info(
+                "Fresh news count (%d) is less than 10. Pulling up to %d unposted top news from DB...",
+                len(candidates),
+                needed_from_db,
+            )
+            db_unposted = await self.news_repo.get_unposted_top_news(
+                limit=needed_from_db,
+                exclude_ids=fresh_ids,
+            )
+            logger.info("Retrieved %d unposted news items from database.", len(db_unposted))
+            pool.extend(db_unposted)
+
+        if not pool:
+            logger.info("No candidates available for post generation.")
+            return []
+
+        # Sort pool descending by ai_score (and secondary by parsed_at)
+        def _candidate_score_key(item: Any) -> tuple[float, float]:
+            score = getattr(item, "ai_score", None)
+            s_val = float(score) if score is not None else 0.0
+            parsed_dt = getattr(item, "parsed_at", None)
+            ts_val = parsed_dt.timestamp() if parsed_dt is not None else 0.0
+            return (s_val, ts_val)
+
+        pool.sort(key=_candidate_score_key, reverse=True)
+
+        selected_top = pool[:resolved_top_k]
+        selected_ids = [item.id for item in selected_top if item.id]
+        logger.info(
+            "Selected top %d news for post generation: %s",
+            len(selected_ids),
+            selected_ids,
+        )
+        return selected_ids
+
+
