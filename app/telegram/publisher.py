@@ -10,6 +10,7 @@ from telethon.errors import (
     ChatWriteForbiddenError,
     FloodWaitError,
     RPCError,
+    TimedOutError,
     UsernameInvalidError,
     UsernameNotOccupiedError,
 )
@@ -35,6 +36,7 @@ from app.telegram.exceptions import (
     TelegramPublishError,
     TelegramPublishFloodWaitError,
     TelegramPublishForbiddenError,
+    TelegramPublishNetworkError,
     TelegramPublishUnauthorizedError,
 )
 
@@ -121,41 +123,36 @@ class TelegramPublisher:
             TelegramPublishUnauthorizedError: If Telegram session is not authorized.
             TelegramPublishError: For any other sending or network failures.
         """
-        # 1. Retrieve post from database
-        post = await self.post_repo.get_by_id(post_id)
-        if not post:
-            raise PostNotFoundError(f"Post with id {post_id} not found")
-
-        # 2. Validation & Deduplication: block if already published or in progress
-        if post.status == StatusType.PUBLISHED:
-            raise PostAlreadyPublishedError(
-                f"Post {post_id} has already been published at {post.published_at}. Duplicate publishing blocked."
-            )
-        if post.status == StatusType.PUBLISHING:
-            raise PostPublishingInProgressError(
-                f"Post {post_id} is currently in the process of being published. Concurrent publishing blocked."
-            )
-
-        # 3. Determine target channel (argument override or configuration fallback)
+        # 1. Determine target channel (argument override or configuration fallback)
         normalized_channel = normalize_target_channel(target_channel) or normalize_target_channel(settings.TG_TARGET_CHANNEL)
         if not normalized_channel:
             raise TelegramChannelValidationError(
                 "Target channel is not specified in request and TG_TARGET_CHANNEL is not configured in settings."
             )
 
-        # Validate that post content is not empty
+        # 2. Acquire publishing lock atomically (status -> PUBLISHING)
+        post = await self.post_repo.acquire_publishing_lock(post_id)
+        if not post:
+            existing = await self.post_repo.get_by_id(post_id)
+            if not existing:
+                raise PostNotFoundError(f"Post with id {post_id} not found")
+            if existing.status == StatusType.PUBLISHED:
+                raise PostAlreadyPublishedError(
+                    f"Post {post_id} has already been published at {existing.published_at}. Duplicate publishing blocked."
+                )
+            if existing.status == StatusType.PUBLISHING:
+                raise PostPublishingInProgressError(
+                    f"Post {post_id} is currently in the process of being published. Concurrent publishing blocked."
+                )
+            raise TelegramPublishError(f"Post {post_id} cannot be published from status '{existing.status}'.")
+
+        # 3. Validate that post content is not empty
         if not post.generated_text or not post.generated_text.strip():
             logger.warning("Post %s has empty generated_text; cannot publish.", post_id)
             await self._mark_failed(post_id)
             raise TelegramPublishError(f"Post {post_id} has empty generated_text; cannot publish.")
 
-        # 4. Set intermediate PUBLISHING status in DB before calling Telegram to prevent race conditions
-        await self.post_repo.update_status(
-            post_id=post.id,
-            status=StatusType.PUBLISHING,
-        )
-
-        # 5. Publish via Telethon client
+        # 4. Publish via Telethon client
         try:
             async with get_telegram_client(self.client) as tg_client:
                 await tg_client.send_message(
@@ -182,7 +179,8 @@ class TelegramPublisher:
             ) from e
         except FloodWaitError as e:
             logger.error("Flood wait of %s seconds while publishing post %s to '%s'", e.seconds, post_id, normalized_channel)
-            await self._mark_failed(post_id)
+            # Revert to GENERATED so subsequent retry task can acquire lock; do not mark FAILED
+            await self.post_repo.update_status(post_id=post.id, status=StatusType.GENERATED)
             raise TelegramPublishFloodWaitError(
                 f"Telegram rate limit: flood wait {e.seconds}s",
                 seconds=e.seconds,
@@ -193,17 +191,18 @@ class TelegramPublisher:
             raise TelegramPublishUnauthorizedError(
                 f"Telegram session is not authorized: {clean_error_message(e)}"
             ) from e
+        except (ConnectionError, OSError, TimedOutError) as e:
+            logger.error("Network error while publishing post %s to '%s': %s", post_id, normalized_channel, e)
+            # Revert to GENERATED so subsequent retry task can acquire lock; do not mark FAILED
+            await self.post_repo.update_status(post_id=post.id, status=StatusType.GENERATED)
+            raise TelegramPublishNetworkError(
+                f"Network error while connecting to Telegram: {e}"
+            ) from e
         except (RPCError, TelegramParserError) as e:
             logger.error("Telegram RPC error while publishing post %s to '%s': %s", post_id, normalized_channel, e)
             await self._mark_failed(post_id)
             raise TelegramPublishError(
                 f"Telegram error publishing to '{normalized_channel}': {clean_error_message(e)}"
-            ) from e
-        except (ConnectionError, OSError) as e:
-            logger.error("Network error while publishing post %s to '%s': %s", post_id, normalized_channel, e)
-            await self._mark_failed(post_id)
-            raise TelegramPublishError(
-                f"Network error while connecting to Telegram: {e}"
             ) from e
         except Exception as e:
             logger.error("Unexpected error publishing post %s to '%s': %s", post_id, normalized_channel, e)

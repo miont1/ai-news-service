@@ -8,6 +8,7 @@ class Settings(BaseSettings):
     OPENAI_MODEL: str = "gpt-5-nano"
     AI_FILTER_ENABLED: bool = True
     AI_FILTER_TOP_K: int = 3
+    NEWS_MAX_AGE_HOURS: int = 48
 
     # Telegram
     TG_API_ID: int | None = None

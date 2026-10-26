@@ -193,3 +193,37 @@ async def test_get_unposted_top_news(db_session: AsyncSession):
     assert unposted_filtered[0].id == "news-unposted-low"
 
 
+@pytest.mark.asyncio
+async def test_get_unposted_top_news_filters_by_published_at_cutoff(db_session: AsyncSession):
+    from datetime import UTC, datetime, timedelta
+
+    repo = NewsRepository(db_session)
+    now = datetime.now(UTC)
+
+    fresh_item = NewsItemCreate(
+        id="news-fresh",
+        title="Fresh News",
+        summary="S1",
+        url="https://ex.com/fresh",
+        source="src",
+        ai_score=8.0,
+        published_at=now - timedelta(hours=5),
+    )
+    stale_item = NewsItemCreate(
+        id="news-stale",
+        title="Stale News From Last Week",
+        summary="S2",
+        url="https://ex.com/stale",
+        source="src",
+        ai_score=10.0,  # Even though score is higher!
+        published_at=now - timedelta(days=7),
+    )
+
+    await repo.save_news_items([fresh_item, stale_item])
+
+    # With max_age_hours=48, stale_item must be excluded despite having higher score!
+    unposted = await repo.get_unposted_top_news(limit=10, max_age_hours=48)
+    assert len(unposted) == 1
+    assert unposted[0].id == "news-fresh"
+
+

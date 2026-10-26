@@ -1,8 +1,11 @@
+from datetime import UTC, datetime, timedelta
+
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.schemas import NewsItemCreate
+from app.config import settings
 from app.models import NewsItem, Post
 
 
@@ -64,8 +67,12 @@ class NewsRepository:
         self,
         limit: int = 10,
         exclude_ids: list[str] | set[str] | None = None,
+        max_age_hours: int | None = None,
     ) -> list[NewsItem]:
-        """Fetch top news from DB that have no corresponding Post, ordered by ai_score descending."""
+        """Fetch top news from DB that have no corresponding Post, ordered by ai_score descending.
+
+        Filters by publication freshness: only returns articles where published_at >= cutoff.
+        """
         query = (
             select(NewsItem)
             .outerjoin(Post, NewsItem.id == Post.news_id)
@@ -75,6 +82,11 @@ class NewsRepository:
             clean_exclude = [eid for eid in exclude_ids if eid]
             if clean_exclude:
                 query = query.where(NewsItem.id.not_in(clean_exclude))
+
+        resolved_max_age = max_age_hours if max_age_hours is not None else settings.NEWS_MAX_AGE_HOURS
+        if resolved_max_age and resolved_max_age > 0:
+            cutoff = datetime.now(UTC) - timedelta(hours=resolved_max_age)
+            query = query.where(NewsItem.published_at >= cutoff)
 
         query = (
             query

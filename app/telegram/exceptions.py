@@ -34,5 +34,9 @@ class TelegramPublishFloodWaitError(TelegramPublishError):
         self.seconds = seconds
 
 
+class TelegramPublishNetworkError(TelegramPublishError):
+    """Raised on transient network connectivity issues, resets, or timeouts."""
+
+
 class TelegramPublishUnauthorizedError(TelegramPublishError):
     """Raised when the Telegram session is not authorized."""

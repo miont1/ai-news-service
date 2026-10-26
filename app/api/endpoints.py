@@ -41,6 +41,7 @@ from app.telegram.exceptions import (
     TelegramPublishError,
     TelegramPublishFloodWaitError,
     TelegramPublishForbiddenError,
+    TelegramPublishNetworkError,
     TelegramPublishUnauthorizedError,
 )
 from app.telegram.publisher import TelegramPublisher
@@ -424,6 +425,19 @@ async def generate_post_from_custom(
     return GenerateCustomResponse(generated_text=generated_text)
 
 
+@news_router.post(
+    "/generate",
+    response_model=GenerateCustomResponse,
+    status_code=status.HTTP_200_OK,
+    tags=["AI Generation"],
+    summary="Generate custom Telegram post",
+)
+async def generate_post(
+    request: GenerateCustomRequest,
+):
+    return await generate_post_from_custom(request)
+
+
 @news_router.get(
     "/posts",
     response_model=list[PostResponse],
@@ -506,6 +520,7 @@ async def publish_post_endpoint(
     except (
         TelegramPublishChannelError,
         TelegramPublishUnauthorizedError,
+        TelegramPublishNetworkError,
         TelegramPublishError,
     ) as e:
         raise HTTPException(

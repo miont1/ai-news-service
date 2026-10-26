@@ -19,6 +19,7 @@ from app.telegram.exceptions import (
     TelegramPublishChannelError,
     TelegramPublishFloodWaitError,
     TelegramPublishForbiddenError,
+    TelegramPublishNetworkError,
 )
 from app.utils import run_async
 
@@ -268,7 +269,7 @@ class TestPublishPostTask:
 
     def test_publish_post_task_network_error_retries(self):
         mock_publisher = MagicMock()
-        mock_publisher.publish_post = AsyncMock(side_effect=ConnectionError("Telegram connection lost"))
+        mock_publisher.publish_post = AsyncMock(side_effect=TelegramPublishNetworkError("Telegram connection lost"))
 
         mock_session_ctx = MagicMock()
         mock_session_ctx.__aenter__ = AsyncMock(return_value=MagicMock())
@@ -287,6 +288,36 @@ class TestPublishPostTask:
             mock_retry.assert_called_once()
             _, kwargs = mock_retry.call_args
             assert kwargs["countdown"] == 60  # 60 * (2 ** 0)
+
+    def test_publish_post_task_network_error_retries_exhausted_marks_failed(self):
+        mock_publisher = MagicMock()
+        mock_publisher.publish_post = AsyncMock(side_effect=TelegramPublishNetworkError("Permanent network loss"))
+
+        with (
+            patch("app.tasks.AsyncSessionLocal"),
+            patch("app.tasks.TelegramPublisher", return_value=mock_publisher),
+            patch("app.tasks._mark_post_failed") as mock_mark_failed,
+            patch.object(publish_post_task.request, "retries", 3),
+        ):
+            with pytest.raises(TelegramPublishNetworkError):
+                publish_post_task(post_id=42)
+
+            mock_mark_failed.assert_called_once_with(42)
+
+    def test_publish_post_task_flood_wait_retries_exhausted_marks_failed(self):
+        mock_publisher = MagicMock()
+        mock_publisher.publish_post = AsyncMock(side_effect=TelegramPublishFloodWaitError("Flood limit", seconds=300))
+
+        with (
+            patch("app.tasks.AsyncSessionLocal"),
+            patch("app.tasks.TelegramPublisher", return_value=mock_publisher),
+            patch("app.tasks._mark_post_failed") as mock_mark_failed,
+            patch.object(publish_post_task.request, "retries", 3),
+        ):
+            with pytest.raises(TelegramPublishFloodWaitError):
+                publish_post_task(post_id=42)
+
+            mock_mark_failed.assert_called_once_with(42)
 
     def test_publish_post_task_already_published_skipped(self):
         mock_publisher = MagicMock()
@@ -446,8 +477,37 @@ class TestUtilsAndService:
         ):
             res = await service.fetch_and_rank_pipeline_news(top_k=2)
 
-        # Top 2 should be db-1 (9.5) and db-2 (8.0), fresh-1 (6.0) is not in top 2
-        assert res == ["db-1", "db-2"]
         # But fresh_item was still saved in DB!
         service.news_repo.save_news_items.assert_awaited_once_with([fresh_item])
-        service.news_repo.get_unposted_top_news.assert_awaited_once_with(limit=10, exclude_ids={"fresh-1"})
+        service.news_repo.get_unposted_top_news.assert_awaited_once_with(limit=10, exclude_ids={"fresh-1"}, max_age_hours=48)
+
+    @pytest.mark.asyncio
+    async def test_fetch_and_rank_pipeline_news_filters_stale_candidates(self):
+        from datetime import UTC, datetime, timedelta
+
+        mock_session = AsyncMock()
+        service = NewsService(mock_session)
+
+        fake_site = Source(id=1, name="Site", url="https://site.com/rss", type=SourceType.SITE, enabled=True)
+        service.source_repo.get_active_sources = AsyncMock(side_effect=[[fake_site], []])
+        service.keyword_repo.get_all_words = AsyncMock(return_value=[])
+
+        now = datetime.now(UTC)
+        fresh_item = NewsItemCreate(id="fresh", title="Fresh News", summary="S1", url="https://site.com/fresh", source="site", published_at=now)
+        stale_item = NewsItemCreate(id="stale", title="Stale News", summary="S2", url="https://site.com/stale", source="site", published_at=now - timedelta(hours=72))
+
+        service.news_repo.get_existing_ids = AsyncMock(return_value=set())
+        service.news_repo.get_existing_urls = AsyncMock(return_value=set())
+        service.news_repo.save_news_items = AsyncMock(return_value=[fresh_item])
+        service.news_repo.get_unposted_top_news = AsyncMock(return_value=[])
+
+        with (
+            patch("app.services.news_service.fetch_rss_feed", new=AsyncMock(return_value=[fresh_item, stale_item])),
+            patch("app.services.news_service.populate_articles_raw_text", new=AsyncMock(side_effect=lambda items: items)),
+            patch.object(service.ai_ranker, "rank_news", new=AsyncMock(return_value=[fresh_item])),
+        ):
+            res = await service.fetch_and_rank_pipeline_news(top_k=2, max_age_hours=48)
+
+        assert res == ["fresh"]
+        # Only fresh_item should be evaluated and saved; stale_item must be excluded!
+        service.news_repo.save_news_items.assert_awaited_once_with([fresh_item])

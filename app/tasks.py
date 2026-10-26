@@ -18,6 +18,7 @@ from app.telegram.exceptions import (
     TelegramPublishChannelError,
     TelegramPublishFloodWaitError,
     TelegramPublishForbiddenError,
+    TelegramPublishNetworkError,
     TelegramPublishUnauthorizedError,
 )
 from app.telegram.publisher import TelegramPublisher
@@ -127,6 +128,19 @@ def run_news_pipeline_task():
     return workflow.apply_async()
 
 
+def _mark_post_failed(post_id: int) -> None:
+    """Helper to record FAILED status on a post when all Celery publication retries are exhausted."""
+    async def _fail() -> None:
+        async with AsyncSessionLocal() as session:
+            repo = PostRepository(session)
+            await repo.update_status(post_id=post_id, status=StatusType.FAILED)
+
+    try:
+        run_async(_fail())
+    except Exception as exc:
+        logger.error("Failed to mark post %s as FAILED: %s", post_id, exc)
+
+
 @celery_app.task(
     bind=True,
     max_retries=3,
@@ -137,6 +151,7 @@ def publish_post_task(self, post_id: int) -> dict[str, Any]:
 
     Retries with custom countdown on Telegram rate limits (FloodWait) and transient
     network connectivity issues. Permanent failures are logged without retrying.
+    Marks post as FAILED only after all retry attempts are exhausted.
     """
     async def _publish() -> None:
         async with AsyncSessionLocal() as session:
@@ -150,6 +165,15 @@ def publish_post_task(self, post_id: int) -> dict[str, Any]:
 
     except TelegramPublishFloodWaitError as exc:
         countdown = exc.seconds or 60
+        if self.request.retries >= self.max_retries:
+            logger.error(
+                "Max retries (%s) exceeded on FloodWait for post %s. Marking post as FAILED.",
+                self.max_retries,
+                post_id,
+            )
+            _mark_post_failed(post_id)
+            raise
+
         logger.warning(
             "FloodWait of %ss encountered for post %s. Retrying in %ss (attempt %s/%s)...",
             exc.seconds,
@@ -160,8 +184,18 @@ def publish_post_task(self, post_id: int) -> dict[str, Any]:
         )
         raise self.retry(exc=exc, countdown=countdown)
 
-    except (ConnectionError, OSError) as exc:
+    except (TelegramPublishNetworkError, ConnectionError, OSError) as exc:
         countdown = 60 * (2 ** self.request.retries)
+        if self.request.retries >= self.max_retries:
+            logger.error(
+                "Max retries (%s) exceeded on network failure for post %s: %s. Marking post as FAILED.",
+                self.max_retries,
+                post_id,
+                exc,
+            )
+            _mark_post_failed(post_id)
+            raise
+
         logger.warning(
             "Network failure publishing post %s: %s. Retrying in %ss (attempt %s/%s)...",
             post_id,

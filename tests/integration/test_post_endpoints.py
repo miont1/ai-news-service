@@ -32,6 +32,26 @@ async def test_generate_post_from_custom(client: AsyncClient):
 
 
 @pytest.mark.asyncio
+async def test_generate_post_spec_endpoint(client: AsyncClient):
+    with patch(
+        "app.api.endpoints.PostGenerator.generate_post",
+        new_callable=AsyncMock,
+    ) as mock_gen:
+        mock_gen.return_value = "🔥 **AI Новина Spec**\n\nОпис новини."
+
+        response = await client.post(
+            "/api/generate",
+            json={
+                "title": "Новина",
+                "content": "Опис новини для ручної генерації.",
+            },
+        )
+
+        assert response.status_code == 200
+        assert response.json()["generated_text"] == "🔥 **AI Новина Spec**\n\nОпис новини."
+
+
+@pytest.mark.asyncio
 async def test_generate_post_from_custom_validation_error(client: AsyncClient):
     response = await client.post(
         "/api/generate/custom",

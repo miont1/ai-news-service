@@ -1,6 +1,6 @@
 from datetime import UTC, datetime
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import Post, StatusType
@@ -26,6 +26,34 @@ class PostRepository:
         await self.session.commit()
         await self.session.refresh(post)
         return post
+
+    async def acquire_publishing_lock(
+        self,
+        post_id: int,
+        allowed_statuses: tuple[StatusType, ...] = (
+            StatusType.NEW,
+            StatusType.GENERATED,
+            StatusType.FAILED,
+        ),
+    ) -> Post | None:
+        """Atomically transition a post to PUBLISHING status if it is in an allowed status.
+
+        Uses atomic `UPDATE ... WHERE id = :post_id AND status IN (...) RETURNING *`.
+        Returns the updated Post instance if the lock was acquired, or None if the post
+        was not found or was in an incompatible status (e.g. PUBLISHED or PUBLISHING).
+        """
+        stmt = (
+            update(Post)
+            .where(Post.id == post_id, Post.status.in_(allowed_statuses))
+            .values(status=StatusType.PUBLISHING)
+            .returning(Post)
+        )
+        result = await self.session.execute(stmt)
+        post = result.scalar_one_or_none()
+        if post:
+            await self.session.commit()
+            return post
+        return None
 
     async def get_by_id(self, post_id: int) -> Post | None:
         return await self.session.get(Post, post_id)

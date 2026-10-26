@@ -28,6 +28,7 @@ from app.telegram.exceptions import (
     TelegramPublishError,
     TelegramPublishFloodWaitError,
     TelegramPublishForbiddenError,
+    TelegramPublishNetworkError,
     TelegramPublishUnauthorizedError,
 )
 from app.telegram.publisher import TelegramPublisher, normalize_target_channel
@@ -307,7 +308,7 @@ async def test_publish_post_username_not_occupied_marks_failed(db_session: Async
 
 
 @pytest.mark.asyncio
-async def test_publish_post_flood_wait_marks_failed(db_session: AsyncSession):
+async def test_publish_post_flood_wait_does_not_mark_failed_and_reverts_status(db_session: AsyncSession):
     post = await _create_test_post(db_session, news_id="pub-flood-wait")
     mock_client = AsyncMock()
     flood_err = FloodWaitError(request=None, capture=120)
@@ -320,9 +321,10 @@ async def test_publish_post_flood_wait_marks_failed(db_session: AsyncSession):
     assert exc_info.value.seconds == 120
     assert "flood wait 120s" in str(exc_info.value)
 
+    # Post must NOT be marked FAILED during retryable flood wait; it reverts to GENERATED
     post_repo = PostRepository(db_session)
     refreshed = await post_repo.get_by_id(post.id)
-    assert refreshed.status == StatusType.FAILED
+    assert refreshed.status == StatusType.GENERATED
 
 
 @pytest.mark.asyncio
@@ -371,15 +373,32 @@ async def test_publish_post_generic_rpc_error_marks_failed(db_session: AsyncSess
 
 
 @pytest.mark.asyncio
-async def test_publish_post_network_connection_error_marks_failed(db_session: AsyncSession):
+async def test_publish_post_network_connection_error_raises_network_error_and_does_not_mark_failed(db_session: AsyncSession):
     post = await _create_test_post(db_session, news_id="pub-net-err")
     mock_client = AsyncMock()
     mock_client.send_message.side_effect = ConnectionError("Connection reset by peer")
     publisher = TelegramPublisher(session=db_session, client=mock_client)
 
-    with pytest.raises(TelegramPublishError, match="Network error"):
+    # Must raise TelegramPublishNetworkError specifically so Celery tasks can distinguish and retry
+    with pytest.raises(TelegramPublishNetworkError, match="Network error"):
         await publisher.publish_post(post.id, target_channel="@channel")
 
+    # Post must NOT be marked FAILED on transient network failure; it reverts to GENERATED
     post_repo = PostRepository(db_session)
     refreshed = await post_repo.get_by_id(post.id)
-    assert refreshed.status == StatusType.FAILED
+    assert refreshed.status == StatusType.GENERATED
+
+
+@pytest.mark.asyncio
+async def test_acquire_publishing_lock_atomic(db_session: AsyncSession):
+    post = await _create_test_post(db_session, news_id="pub-lock-test")
+    post_repo = PostRepository(db_session)
+
+    # First lock acquisition should succeed
+    locked = await post_repo.acquire_publishing_lock(post.id)
+    assert locked is not None
+    assert locked.status == StatusType.PUBLISHING
+
+    # Second concurrent acquisition should fail (return None) because status is now PUBLISHING
+    locked_again = await post_repo.acquire_publishing_lock(post.id)
+    assert locked_again is None

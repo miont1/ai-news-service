@@ -1,4 +1,5 @@
 import asyncio
+from datetime import UTC, datetime, timedelta
 import logging
 from typing import Any
 
@@ -367,6 +368,7 @@ class NewsService:
         limit_per_channel: int = 20,
         min_text_length: int = 200,
         client: Any = None,
+        max_age_hours: int | None = None,
     ) -> list[str]:
         """Fetch candidates from active Sites and Telegram sources, rank joint top_k, and persist.
 
@@ -456,6 +458,26 @@ class NewsService:
             if item_id not in existing_ids and (not item.url or item.url not in existing_urls)
         ]
 
+        # 4.1 Filter candidates by publication freshness (published_at >= cutoff)
+        resolved_max_age = max_age_hours if max_age_hours is not None else settings.NEWS_MAX_AGE_HOURS
+        if resolved_max_age and resolved_max_age > 0:
+            cutoff = datetime.now(UTC) - timedelta(hours=resolved_max_age)
+
+            def _is_fresh(item: NewsItemCreate) -> bool:
+                if not item.published_at:
+                    return True
+                dt = item.published_at if item.published_at.tzinfo else item.published_at.replace(tzinfo=UTC)
+                return dt >= cutoff
+
+            fresh_candidates = [c for c in candidates if _is_fresh(c)]
+            if len(fresh_candidates) < len(candidates):
+                logger.info(
+                    "Filtered out %d stale candidate articles (published more than %s hours ago).",
+                    len(candidates) - len(fresh_candidates),
+                    resolved_max_age,
+                )
+            candidates = fresh_candidates
+
         resolved_top_k = top_k if top_k is not None else settings.AI_FILTER_TOP_K
         ai_filter_active = settings.AI_FILTER_ENABLED
 
@@ -477,7 +499,7 @@ class NewsService:
             logger.info("0 fresh candidates found across sources.")
 
         # 6. Form selection pool for top-k posts:
-        # If fresh candidates < 10, pull up to 10 unposted top news from DB
+        # If fresh candidates < 10, pull up to 10 unposted top news from DB (filtered by freshness)
         pool: list[Any] = list(candidates)
 
         if len(candidates) < 10:
@@ -491,6 +513,7 @@ class NewsService:
             db_unposted = await self.news_repo.get_unposted_top_news(
                 limit=needed_from_db,
                 exclude_ids=fresh_ids,
+                max_age_hours=resolved_max_age,
             )
             logger.info("Retrieved %d unposted news items from database.", len(db_unposted))
             pool.extend(db_unposted)
